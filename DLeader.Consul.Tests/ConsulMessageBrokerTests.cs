@@ -109,40 +109,60 @@ namespace DLeader.Consul.Tests.Implementations
             var broker = CreateMessageBroker();
             var handler1Called = false;
             var handler2Called = false;
+            var tcs1 = new TaskCompletionSource<bool>();
+            var tcs2 = new TaskCompletionSource<bool>();
 
             _kvEndpointMock
                 .Setup(x => x.List(It.IsAny<string>(), It.IsAny<QueryOptions>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new QueryResult<KVPair[]>
+                .ReturnsAsync((string key, QueryOptions options, CancellationToken token) =>
                 {
-                    LastIndex = 1,
-                    Response = new[]
+                    return new QueryResult<KVPair[]>
                     {
-                        new KVPair("test")
+                        LastIndex = options.WaitIndex + 1,
+                        Response = new[]
                         {
-                            Value = Encoding.UTF8.GetBytes("test-message-content")
-                        }
+                    new KVPair($"messages/{messageType}/test")
+                    {
+                        ModifyIndex = options.WaitIndex + 1,
+                        Value = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { Content = "test-message-content" }))
                     }
+                        }
+                    };
                 });
 
             // Act
             await broker.SubscribeAsync(messageType, async (message) =>
             {
                 handler1Called = true;
+                tcs1.SetResult(true);
                 await Task.CompletedTask;
             });
 
             await broker.SubscribeAsync(messageType, async (message) =>
             {
                 handler2Called = true;
+                tcs2.SetResult(true);
                 await Task.CompletedTask;
             });
 
-            // Wait a bit for the background task to process
-            await Task.Delay(100);
+            // Wait for both handlers with timeout
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(5));
+            var completedTasks = await Task.WhenAny(
+                Task.WhenAll(tcs1.Task, tcs2.Task),
+                timeoutTask
+            );
 
             // Assert
-            Assert.True(handler1Called);
-            Assert.True(handler2Called);
+            Assert.NotEqual(timeoutTask, completedTasks);
+            Assert.True(handler1Called, "First handler was not called");
+            Assert.True(handler2Called, "Second handler was not called");
+
+            // Verify Consul interactions
+            _kvEndpointMock.Verify(x => x.List(
+                It.Is<string>(s => s.Contains(messageType)),
+                It.IsAny<QueryOptions>(),
+                It.IsAny<CancellationToken>()
+            ), Times.AtLeastOnce());
         }
 
         [Fact]
