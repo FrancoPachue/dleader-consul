@@ -6,6 +6,7 @@ using System.Text;
 using DLeader.Consul.Implementations;
 using System.Threading.Tasks;
 using LogLevel = Microsoft.Extensions.Logging.LogLevel;
+using System.Text.Json;
 
 namespace DLeader.Consul.Tests.Implementations
 {
@@ -59,33 +60,45 @@ namespace DLeader.Consul.Tests.Implementations
             var messageType = "test-message";
             var broker = CreateMessageBroker();
             var handlerCalled = false;
+            var tcs = new TaskCompletionSource<bool>();
 
             _kvEndpointMock
                 .Setup(x => x.List(It.IsAny<string>(), It.IsAny<QueryOptions>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new QueryResult<KVPair[]>
+                .ReturnsAsync((string key, QueryOptions options, CancellationToken token) =>
                 {
-                    LastIndex = 1,
-                    Response = new[]
+                    return new QueryResult<KVPair[]>
                     {
-                        new KVPair("test")
+                        LastIndex = options.WaitIndex + 1, // Incrementar el índice
+                        Response = new[]
                         {
-                            Value = Encoding.UTF8.GetBytes("test-message-content")
-                        }
+                    new KVPair($"messages/{messageType}/test")
+                    {
+                        ModifyIndex = options.WaitIndex + 1,
+                        Value = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { Content = "test-message-content" }))
                     }
+                        }
+                    };
                 });
 
             // Act
             await broker.SubscribeAsync(messageType, async (message) =>
             {
                 handlerCalled = true;
+                tcs.SetResult(true);
                 await Task.CompletedTask;
             });
 
-            // Wait a bit for the background task to process
-            await Task.Delay(100);
-
             // Assert
-            Assert.True(handlerCalled);
+            var result = await Task.WhenAny(tcs.Task, Task.Delay(1000));
+            Assert.Same(tcs.Task, result);
+            Assert.True(handlerCalled, "Handler was not called within the expected timeframe");
+
+            // Verify Consul interactions
+            _kvEndpointMock.Verify(x => x.List(
+                It.Is<string>(s => s.Contains(messageType)),
+                It.IsAny<QueryOptions>(),
+                It.IsAny<CancellationToken>()
+            ), Times.AtLeastOnce());
         }
 
         [Fact]
