@@ -18,11 +18,13 @@ A .NET library that provides distributed leader election capabilities using Hash
 dotnet add package DLeader.Consul
 ```
 
+View package on [NuGet Gallery](https://www.nuget.org/packages/DLeader.Consul)
+
 ## Quick Start
 
 ```csharp
 // Register the service
-services.AddConsulLeader(options =>
+services.AddConsulLeaderElection(options =>
 {
     options.ServiceName = "my-service";
     options.Address = "http://consul:8500";
@@ -32,82 +34,104 @@ services.AddConsulLeader(options =>
 public class MyService : BackgroundService
 {
     private readonly ILeaderElection _leaderElection;
+    private readonly ILogger<MyService> _logger;
     
-    public MyService(ILeaderElection leaderElection)
+    public MyService(ILeaderElection leaderElection, ILogger<MyService> logger)
     {
         _leaderElection = leaderElection;
-        _leaderElection.OnLeadershipAcquired += HandleLeadershipAcquired;
-        _leaderElection.OnLeadershipLost += HandleLeadershipLost;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await _leaderElection.StartLeaderElectionAsync(stoppingToken);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (await _leaderElection.IsLeaderAsync())
+            {
+                _logger.LogInformation("This instance is the leader");
+                // Do leader-specific work
+            }
+
+            await Task.Delay(1000, stoppingToken);
+        }
     }
 }
 ```
 
 ## Configuration Options
 
+### ConsulOptions
+
 ```csharp
 public class ConsulOptions
 {
-    public string ServiceName { get; set; } = "leadership-service";
+    public string ServiceName { get; set; } = string.Empty;
     public string Address { get; set; } = "http://localhost:8500";
-    public int SessionTTL { get; set; } = 15;
+    public int SessionTTL { get; set; } = 10;
+    public int LeaderCheckInterval { get; set; } = 5;
     public int RenewInterval { get; set; } = 5;
-    public int LeaderCheckInterval { get; set; } = 1;
+    public int VerificationRetries { get; set; } = 3;
+    public int VerificationRetryDelay { get; set; } = 1;
+}
+```
+
+### ServiceRegistrationOptions
+
+```csharp
+public class ServiceRegistrationOptions
+{
+    public int ServicePort { get; set; }
+    public string HealthCheckEndpoint { get; set; } = "/health";
+    public TimeSpan HealthCheckInterval { get; set; } = TimeSpan.FromSeconds(10);
+    public TimeSpan HealthCheckTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public TimeSpan DeregisterAfter { get; set; } = TimeSpan.FromMinutes(1);
 }
 ```
 
 ## Advanced Usage
 
-### Custom Service Registration
+### Configuration in appsettings.json
 
-```csharp
-services.AddConsulLeader(options =>
+```json
 {
-    options.ServiceName = "my-service";
-    options.Address = "http://consul:8500";
-    options.SessionTTL = 15;
-    options.RenewInterval = 5;
-}, serviceOptions =>
-{
-    serviceOptions.ServicePort = 5000;
-    serviceOptions.HealthCheckEndpoint = "/health";
-    serviceOptions.Tags = new[] { "production", "web" };
-});
+  "Consul": {
+    "ServiceName": "your-service-name",
+    "Address": "http://localhost:8500",
+    "SessionTTL": 10,
+    "LeaderCheckInterval": 5,
+    "RenewInterval": 5,
+    "VerificationRetries": 3,
+    "VerificationRetryDelay": 1
+  },
+  "ServiceRegistration": {
+    "ServicePort": 5000,
+    "HealthCheckEndpoint": "/health",
+    "HealthCheckInterval": "00:00:10",
+    "HealthCheckTimeout": "00:00:05",
+    "DeregisterAfter": "00:01:00"
+  }
+}
 ```
-
 
 ## Prerequisites
 
-- .NET 8.0 or higher
+- .NET 8.0
 - Consul server (local or remote)
-
-## Dependencies
-
-- Consul (>= 1.6.10.9)
-- Microsoft.Extensions.DependencyInjection (>= 8.0.0)
-- Microsoft.Extensions.Logging (>= 8.0.0)
 
 ## Running the Examples
 
 1. Start Consul:
 ```bash
-docker run -d -p 8500:8500 consul:latest
+docker-compose up -d
 ```
 
 2. Run multiple instances:
 ```bash
-dotnet run --project samples/ConsulLeaderExample
+dotnet run --project DLeader.Consul.Example
 ```
---
 
-You can run 
-```bash
-docker compose up --build
-```
 ## Testing
 
 ```bash
@@ -135,7 +159,7 @@ If you need help or have any questions:
 
 ## Maintainers
 
-- Franco Pachue
+- Franco Pacheco
 
 ## Acknowledgments
 
