@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  consul:
+    image: hashicorp/consul:latest
+    container_name: consul
+    ports:
+      - "8500:8500"
+      - "8600:8600/udp"
+    volumes:
+      - consul_data:/consul/data
+    command: >
+      consul agent -server 
+      -bootstrap-expect=1 
+      -node=server-1 
+      -bind=0.0.0.0 
+      -client=0.0.0.0 
+      -ui 
+      -data-dir=/consul/data
+      -dev
+    networks:
+      - consul-network
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  dleader-consul-example-1:
+    image: dleader-consul-example
+    build:
+      context: ..
+      dockerfile: DLeader.Consul.Example/Dockerfile
+    container_name: dleader-consul-example-1
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConsulConfig__Address=http://consul:8500
+      - ConsulConfig__ServiceName=dleader-consul-example
+      - ConsulConfig__SessionTTL=10
+      - ConsulConfig__RetryInterval=5
+      - ConsulConfig__LeaderCheckInterval=5
+      - ConsulConfig__VerificationRetries=3
+      - ConsulConfig__VerificationRetryDelay=1
+      - ServiceRegistration__ServicePort=8081
+      - ServiceRegistration__HealthCheckEndpoint=/health
+      - ServiceRegistration__HealthCheckInterval=00:00:10
+      - ServiceRegistration__HealthCheckTimeout=00:00:05
+      - ServiceRegistration__DeregisterAfter=00:01:00
+      - ASPNETCORE_URLS=http://+:8081
+    ports:
+      - "5001:8081"
+    networks:
+      - consul-network
+    depends_on:
+      consul:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  dleader-consul-example-2:
+    image: dleader-consul-example
+    container_name: dleader-consul-example-2
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConsulConfig__Address=http://consul:8500
+      - ConsulConfig__ServiceName=dleader-consul-example
+      - ConsulConfig__SessionTTL=10
+      - ConsulConfig__RetryInterval=5
+      - ConsulConfig__LeaderCheckInterval=5
+      - ConsulConfig__VerificationRetries=3
+      - ConsulConfig__VerificationRetryDelay=1
+      - ServiceRegistration__ServicePort=8082
+      - ServiceRegistration__HealthCheckEndpoint=/health
+      - ServiceRegistration__HealthCheckInterval=00:00:10
+      - ServiceRegistration__HealthCheckTimeout=00:00:05
+      - ServiceRegistration__DeregisterAfter=00:01:00
+      - ASPNETCORE_URLS=http://+:8082
+    ports:
+      - "5002:8082"
+    networks:
+      - consul-network
+    depends_on:
+      consul:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+  dleader-consul-example-3:
+    image: dleader-consul-example
+    container_name: dleader-consul-example-3
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ConsulConfig__Address=http://consul:8500
+      - ConsulConfig__ServiceName=dleader-consul-example
+      - ConsulConfig__SessionTTL=10
+      - ConsulConfig__RetryInterval=5
+      - ConsulConfig__LeaderCheckInterval=5
+      - ConsulConfig__VerificationRetries=3
+      - ConsulConfig__VerificationRetryDelay=1
+      - ServiceRegistration__ServicePort=8083
+      - ServiceRegistration__HealthCheckEndpoint=/health
+      - ServiceRegistration__HealthCheckInterval=00:00:10
+      - ServiceRegistration__HealthCheckTimeout=00:00:05
+      - ServiceRegistration__DeregisterAfter=00:01:00
+      - ASPNETCORE_URLS=http://+:8083
+    ports:
+      - "5003:8083"
+    networks:
+      - consul-network
+    depends_on:
+      consul:
+        condition: service_healthy
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+networks:
+  consul-network:
+    driver: bridge
+
+volumes:
+  consul_data:
