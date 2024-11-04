@@ -11,8 +11,8 @@
     <Authors>FrancoPachue</Authors>
     <Description>A distributed leader election library for .NET applications using HashiCorp Consul.</Description>
     <PackageTags>consul;leader-election;distributed-systems;dotnet;microservices</PackageTags>
-    <PackageProjectUrl>https://github.com/FrancoPachue/DLeader.Consul</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/FrancoPachue/DLeader.Consul</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/FrancoPachue/dleader-consul</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FrancoPachue/dleader-consul</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
