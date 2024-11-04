@@ -102,7 +102,12 @@ docker run -d -p 8500:8500 consul:latest
 ```bash
 dotnet run --project samples/ConsulLeaderExample
 ```
+--
 
+You can run 
+```bash
+docker compose up --build
+```
 ## Testing
 
 ```bash
