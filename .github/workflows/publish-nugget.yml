@@ -21,13 +21,18 @@ jobs:
       run: dotnet restore
     
     - name: Build
-      run: dotnet build --configuration Release --no-restore
+      run: dotnet build --configuration Release
     
     - name: Test
-      run: dotnet test --no-restore --verbosity normal
+      run: dotnet test --configuration Release --no-build
     
-    - name: Pack
-      run: dotnet pack ./DLeader.Consul/DLeader.Consul.csproj --configuration Release --no-build --output nupkgs
+    - name: Create Package
+      run: |
+        mkdir -p nupkgs
+        dotnet pack ./DLeader.Consul/DLeader.Consul.csproj \
+          --configuration Release \
+          --output nupkgs \
+          -p:PackageVersion=${GITHUB_REF#refs/tags/v}
     
     - name: Push to NuGet
       run: dotnet nuget push "./nupkgs/*.nupkg" --source https://api.nuget.org/v3/index.json --api-key ${{secrets.NUGET_API_KEY}} --skip-duplicate
