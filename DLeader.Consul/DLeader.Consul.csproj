@@ -4,12 +4,32 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- NuGet Package Information -->
+    <PackageId>DLeader.Consul</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>FrancoPachue</Authors>
+    <Description>A distributed leader election library for .NET applications using HashiCorp Consul.</Description>
+    <PackageTags>consul;leader-election;distributed-systems;dotnet;microservices</PackageTags>
+    <PackageProjectUrl>https://github.com/FrancoPachue/DLeader.Consul</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FrancoPachue/DLeader.Consul</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+
+    <!-- Source Link -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
+  <!-- Include README and icon in the package -->
+
+  <!-- Source Link Package -->
   <ItemGroup>
-    <PackageReference Include="Consul" Version="1.7.14.4" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
-    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
 </Project>
