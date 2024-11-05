@@ -159,7 +159,7 @@ If you need help or have any questions:
 
 ## Maintainers
 
-- Franco Pacheco
+- Franco Pachue
 
 ## Acknowledgments
 
