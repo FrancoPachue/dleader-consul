@@ -12,7 +12,10 @@ namespace DLeader.Consul.Implementations;
 /// <summary>
 /// Distributed leader election implementation using Consul
 /// </summary>
-public class ConsulLeaderElection : ILeaderElection, IDisposable
+public class ConsulLeaderElection : 
+    ILeaderElection,
+    IDisposable, 
+    IAsyncDisposable
 {
     private readonly ILogger<ConsulLeaderElection> _logger;
     private readonly ConsulOptions _options;
@@ -409,45 +412,37 @@ public class ConsulLeaderElection : ILeaderElection, IDisposable
     /// </summary>
     public void Dispose()
     {
-        Dispose(true);
+        DisposeAsync().GetAwaiter().GetResult();
         GC.SuppressFinalize(this);
     }
 
-    /// <summary>
-    /// Releases the resources used by the instance
-    /// </summary>
-    /// <param name="disposing">True if called from Dispose(), false if called from finalizer</param>
-    protected virtual void Dispose(bool disposing)
+    public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
 
-        if (disposing)
+        try
         {
-            try
-            {
-                _logger.LogInformation("Disposing service with ID: {ServiceId}", _instanceId);
-                
-                _consulClient.Agent.ServiceDeregister(_instanceId).GetAwaiter().GetResult();
-                _logger.LogInformation("Service deregistered from Consul: {ServiceId}", _instanceId);
+            _logger.LogInformation("Disposing service with ID: {ServiceId}", _instanceId);
+            await _consulClient.Agent.ServiceDeregister(_instanceId);
+            _logger.LogInformation("Service deregistered from Consul: {ServiceId}", _instanceId);
 
-                if (_isLeader)
-                {
-                    _consulClient.KV.Delete(_lockKey).GetAwaiter().GetResult();
-                    _logger.LogInformation("Leadership lock released for service: {ServiceId}", _instanceId);
-                }
-            }
-            catch (Exception ex)
+            if (_isLeader)
             {
-                _logger.LogError(ex, "Error during cleanup in Dispose for service: {ServiceId}", _instanceId);
-            }
-            finally
-            {
-                _cts?.Cancel();
-                _cts?.Dispose();
-                _consulClient?.Dispose();
+                await _consulClient.KV.Delete(_lockKey);
+                _logger.LogInformation("Leadership lock released for service: {ServiceId}", _instanceId);
             }
         }
-
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during async disposal for service: {ServiceId}", _instanceId);
+        }
+        finally
+        {
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _consulClient?.Dispose();
+        }
         _disposed = true;
     }
 }

@@ -349,6 +349,22 @@ namespace DLeader.Consul.Tests.Implementations
         }
 
         [Fact]
+        public async Task DisposeAsync_CleansUpResourcesAsync()
+        {
+            // Arrange
+            var leaderElection = CreateLeaderElection();
+            ConfigureSuccessfulStartup();
+
+            // Act
+            await leaderElection.DisposeAsync();
+
+            // Assert
+            _agentEndpointMock.Verify(
+                x => x.ServiceDeregister(It.IsAny<string>(), It.IsAny<CancellationToken>()),
+                Times.Once);
+        }
+
+        [Fact]
         public async Task RaiseLeadershipAcquiredEvent_InvokesHandler()
         {
             // Arrange
@@ -470,7 +486,7 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Error,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error during cleanup")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error during async disposal")),
                     It.IsAny<Exception>(),
                     It.IsAny<Func<It.IsAnyType, Exception, string>>()),
                 Times.Once);
