@@ -196,10 +196,13 @@ Concretely, this library does **not** guarantee that:
   race, and the library's other guarantees will not save you.
 - **The fencing token orders anything beyond this one key.** It is the `ModifyIndex` of
   one KV entry. It says nothing about other keys, other services, or wall-clock time.
-- **Delivery, ordering or durability from `IMessageBroker`.** That type is a
-  convenience for coordination chatter over the KV store. Messages are delivered at
-  least once, duplicated freely, retained for a few minutes and lost entirely for any
-  instance that is down when they are published. It is not a queue.
+- **Durability from `IMessageBroker`.** That type is a convenience for coordination
+  chatter over the KV store. A subscriber receives what is published after
+  `SubscribeAsync` completes, in the order Consul accepted it, normally once each — but
+  a retry after a failed watch can redeliver, messages are swept after
+  `MessageBrokerOptions.Retention` (five minutes by default), and an instance that is
+  down when one is published never sees it. It is not a queue, and raising the
+  retention does not make it one.
 
 ### If your resource cannot accept a fencing token
 
@@ -254,6 +257,29 @@ Lowering `LockDelaySeconds` shortens failover and shortens the window in which a
 leader is expected to notice. Raising it does the opposite. There is no setting that
 gives you both.
 
+### `ServiceRegistrationOptions`
+
+Only used by the campaign API, which registers this instance as a Consul service.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ServicePort` | `0` | Port registered in Consul and used to build the instance id. |
+| `ServiceAddress` | *(empty)* | Address Consul dials for the health check. Falls back to `HOSTNAME`, then the machine name. Set it when that is not the address the agent can reach — behind NAT, or in a container whose hostname the agent cannot resolve. |
+| `HealthCheckEndpoint` | `/health` | Path of the HTTP health check. |
+| `HealthCheckInterval` | `10` | Seconds between health checks. |
+| `HealthCheckTimeout` | `5` | Seconds before a health check times out. |
+| `DeregisterCriticalServiceAfter` | `60` | Seconds a failing service is kept before Consul removes it. |
+| `Tags` | `["leadership-service"]` | Tags applied to the registration. |
+| `DeregisterSiblingInstancesOnStart` | `false` | Deregister other instances of this service found on the local agent at startup. Off by default: with two instances sharing an agent, each would remove the other. Re-registering the same id already replaces a previous incarnation, so this is rarely needed. |
+
+### `MessageBrokerOptions`
+
+| Option | Default | Meaning |
+|---|---|---|
+| `Retention` | `5 min` | How long a published message survives before the sweep deletes it. |
+| `CleanupInterval` | `1 min` | How often expired messages are swept. |
+| `WatchTimeout` | `1 min` | Long-poll timeout for the watch. Not a delivery delay — Consul answers as soon as something changes; lowering it only adds idle requests. |
+
 Bind from `appsettings.json` the usual way:
 
 ```csharp
@@ -286,11 +312,13 @@ dotnet test DLeader.Consul.Tests                               # unit, all targe
 dotnet test DLeader.Consul.IntegrationTests                    # needs Docker
 ```
 
-Integration tests start a real Consul in a container through Testcontainers and cover
-contested acquisition, fencing-token monotonicity, loss detection when the session is
-destroyed, and loss detection when the agent becomes unreachable. They are the only
-tests that can tell you whether the guarantees above actually hold, so changes to the
-lease path need to go through them.
+Integration tests start a real Consul in a container through Testcontainers, run on all
+three targets, and cover contested acquisition, fencing-token monotonicity, loss
+detection when the session is destroyed, loss detection when the agent becomes
+unreachable, message delivery and de-duplication, and what the campaign path actually
+registers. They are the only tests that can tell you whether the guarantees above hold —
+every bug fixed in 1.11.0 was invisible to the mocked suite — so changes to the lease or
+broker paths need to go through them.
 
 Requires the .NET 10 SDK to build (it produces all three targets) and Docker to run the
 integration suite.

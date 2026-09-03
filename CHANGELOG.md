@@ -32,6 +32,13 @@ API that can be used correctly, and the one that could not is marked obsolete.
 - `ConsulOptions.LeaseSafetyMarginSeconds` (default 2) — subtracted from `SessionTTL`
   to derive the local deadline at which a lease declares itself lost. Measured on a
   monotonic clock, so wall-clock skew cannot move it.
+- `MessageBrokerOptions` — `Retention`, `CleanupInterval` and `WatchTimeout` for the
+  message broker, previously hardcoded.
+- `ServiceRegistrationOptions.ServiceAddress` — the address Consul dials for the health
+  check, for when it differs from the machine name.
+- `ServiceRegistrationOptions.DeregisterSiblingInstancesOnStart` — off by default; see
+  Fixed.
+- `ConsulMessageBroker` implements `IAsyncDisposable`.
 - Integration test suite running against a real Consul in a container via
   Testcontainers: contested acquisition, fencing-token monotonicity across handovers,
   loss detection when the session is destroyed, loss detection when the agent becomes
@@ -96,6 +103,39 @@ API that can be used correctly, and the one that could not is marked obsolete.
   singleton shared with the leader election.
 - Fixed a compilation error in the message broker's watch loop
   (`GetValueOrDefault` could not infer `ulong` from an `int` literal).
+- **The broker replayed the whole retention window on every message.** The watch loop
+  re-dispatched every key still under the prefix whenever any of them changed, so
+  publishing N messages produced O(N²) handler invocations and each handler saw every
+  message it had already processed again. It now tracks the index each key was last
+  modified at and dispatches only what is above the last one seen, in `ModifyIndex`
+  order.
+- **Messages published in the same timer tick overwrote each other.** Keys were built
+  from `DateTime.UtcNow.Ticks` alone, whose resolution is around 15 ms on Windows, so a
+  tight publish loop silently lost messages. Keys now carry a per-instance sequence and
+  a unique suffix.
+- **`SubscribeAsync` returned before the watch existed.** Anything published in that
+  window was dropped, because the watch then started from an index that already
+  included it. The returned task now completes only once the subscription is
+  established, so "published after `SubscribeAsync` returns" means something.
+- **The broker disposed its `CancellationTokenSource` while the watch loops were still
+  using its token.** Only the cleanup loop was awaited, and only for 500 ms. All loops
+  are now awaited before the source goes away.
+- A new subscriber no longer receives the backlog of messages published before it
+  existed.
+- **Startup deregistered sibling instances sharing a Consul agent.** `Agent.Services`
+  lists everything on the local agent, so with two instances of a service on one host
+  each removed the other on startup. This is now opt-in through
+  `DeregisterSiblingInstancesOnStart` and off by default: re-registering an existing id
+  already replaces the previous incarnation, and Consul removes registrations whose
+  health check has been failing for `DeregisterCriticalServiceAfter`.
+- **Five of the six `ServiceRegistrationOptions` properties were ignored.** The service
+  registration hardcoded the tags, health endpoint, check interval, check timeout and
+  deregister window, so setting `HealthCheckEndpoint` to `/healthz` changed nothing.
+  All of them are now honoured.
+- **The health check could be registered against `localhost`.** The address fell back
+  to the literal `localhost` while the instance id fell back to the machine name, so
+  the two disagreed and Consul checked whichever host its agent ran on. Both now fall
+  back the same way, and `ServiceAddress` overrides it.
 
 ## [1.10.0] - 2025-02
 

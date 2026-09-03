@@ -29,5 +29,10 @@ public interface IMessageBroker
     /// Invoked for each message. Exceptions it throws are logged and swallowed so that
     /// one failing handler cannot stop the others.
     /// </param>
+    /// <remarks>
+    /// The returned task completes once the subscription is established, so every
+    /// message broadcast after that point is delivered. Messages published before it
+    /// are not: a subscriber only sees what happens from the moment it starts watching.
+    /// </remarks>
     Task SubscribeAsync(string messageType, Func<string, Task> handler);
 }

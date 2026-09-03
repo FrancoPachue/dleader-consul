@@ -68,11 +68,13 @@ namespace DLeader.Consul.Extensions
                 var consulClient = sp.GetRequiredService<IConsulClient>();
                 var logger = sp.GetRequiredService<ILogger<ConsulMessageBroker>>();
                 var options = sp.GetRequiredService<IOptions<ConsulOptions>>().Value;
-                
+                var brokerOptions = sp.GetService<IOptions<MessageBrokerOptions>>()?.Value;
+
                 return new ConsulMessageBroker(
-                    options.ServiceName, 
+                    options.ServiceName,
                     logger,
-                    consulClient);
+                    consulClient,
+                    brokerOptions);
             });
 
             return services;

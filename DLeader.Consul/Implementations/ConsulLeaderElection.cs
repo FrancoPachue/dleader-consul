@@ -319,6 +319,16 @@ public class ConsulLeaderElection :
     /// <param name="cancellationToken">Cancellation token</param>
     private async Task DeregisterPreviousServiceAsync(CancellationToken cancellationToken)
     {
+        // Off by default. Agent.Services lists everything on the local agent, so
+        // deregistering every other instance of this service name takes down siblings
+        // that share the agent. Re-registering with the same ID already replaces a
+        // previous incarnation of this instance, and Consul removes registrations whose
+        // health check has been failing for DeregisterCriticalServiceAfter.
+        if (!_serviceOptions.DeregisterSiblingInstancesOnStart)
+        {
+            return;
+        }
+
         try
         {
             var services = await _consulClient.Agent.Services(cancellationToken);
@@ -378,19 +388,28 @@ public class ConsulLeaderElection :
     /// <returns>The service registration configuration</returns>
     private AgentServiceRegistration CreateServiceRegistration()
     {
+        // Every one of these used to be hardcoded, so five of the six properties on
+        // ServiceRegistrationOptions were silently ignored: setting HealthCheckEndpoint
+        // to "/healthz" changed nothing at all.
+        var address = GetHostAddress();
+        var endpoint = string.IsNullOrWhiteSpace(_serviceOptions.HealthCheckEndpoint)
+            ? "/health"
+            : "/" + _serviceOptions.HealthCheckEndpoint.TrimStart('/');
+
         return new AgentServiceRegistration
         {
             ID = _instanceId,
             Name = _options.ServiceName,
-            Tags = new[] { "leadership-service" },
+            Tags = _serviceOptions.Tags,
             Port = _serviceOptions.ServicePort,
-            Address = GetHostAddress(),
+            Address = address,
             Check = new AgentServiceCheck
             {
-                DeregisterCriticalServiceAfter = TimeSpan.FromMinutes(1),
-                HTTP = $"http://{GetHostAddress()}:{_serviceOptions.ServicePort}/health",
-                Interval = TimeSpan.FromSeconds(10),
-                Timeout = TimeSpan.FromSeconds(5)
+                DeregisterCriticalServiceAfter =
+                    TimeSpan.FromSeconds(_serviceOptions.DeregisterCriticalServiceAfter),
+                HTTP = $"http://{address}:{_serviceOptions.ServicePort}{endpoint}",
+                Interval = TimeSpan.FromSeconds(_serviceOptions.HealthCheckInterval),
+                Timeout = TimeSpan.FromSeconds(_serviceOptions.HealthCheckTimeout)
             }
         };
     }
@@ -683,7 +702,15 @@ public class ConsulLeaderElection :
     /// <returns>The host address</returns>
     private string GetHostAddress()
     {
-        return Environment.GetEnvironmentVariable("HOSTNAME") ?? "localhost";
+        if (!string.IsNullOrWhiteSpace(_serviceOptions.ServiceAddress))
+        {
+            return _serviceOptions.ServiceAddress;
+        }
+
+        // The fallback matches the one used to build the instance id. It used to be the
+        // literal "localhost", which disagreed with the instance id and registered a
+        // health check aimed at whichever host the Consul agent runs on.
+        return Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
     }
 
     /// <summary>

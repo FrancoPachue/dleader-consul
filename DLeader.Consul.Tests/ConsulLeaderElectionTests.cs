@@ -199,6 +199,9 @@ namespace DLeader.Consul.Tests.Implementations
         public async Task StartLeaderElectionAsync_CleansUpStaleServices()
         {
             // Arrange
+            // La limpieza de instancias hermanas es opt-in: por defecto esta apagada
+            // porque desregistra a los hermanos que comparten el agente local.
+            _serviceOptions.DeregisterSiblingInstancesOnStart = true;
             var leaderElection = CreateLeaderElection();
             var staleServices = new Dictionary<string, AgentService>
             {
