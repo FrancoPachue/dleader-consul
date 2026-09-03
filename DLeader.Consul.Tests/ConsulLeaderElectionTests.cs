@@ -111,6 +111,7 @@ namespace DLeader.Consul.Tests.Implementations
                 {
                     Response = new KVPair(_lockKey)
                     {
+                        Session = _testSessionId,
                         Value = Encoding.UTF8.GetBytes(instanceId)
                     }
                 });
@@ -188,9 +189,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Information,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Registering service with ID")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Registering service with ID")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Once);
         }
 
@@ -300,7 +301,7 @@ namespace DLeader.Consul.Tests.Implementations
                     It.IsAny<EventId>(),
                     It.Is<It.IsAnyType>((v, t) => true),
                     It.IsAny<Exception>(),
-                    It.Is<Func<It.IsAnyType, Exception, string>>((v, t) => true)),
+                    It.Is<Func<It.IsAnyType, Exception?, string>>((v, t) => true)),
                 Times.AtLeastOnce);
         }
 
@@ -312,7 +313,10 @@ namespace DLeader.Consul.Tests.Implementations
             ConfigureSuccessfulStartup();
 
             // Act
+            // Cubre deliberadamente la API obsoleta que seguimos soportando.
+            #pragma warning disable CS0618
             var isLeader = await leaderElection.IsLeaderAsync();
+            #pragma warning restore CS0618
 
             // Assert
             Assert.True(isLeader);
@@ -431,9 +435,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Error,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error in leader election loop")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Error in leader election loop")),
                     It.Is<Exception>(ex => ex.Message == "KV acquire failed"),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.AtLeastOnce);
         }
 
@@ -445,7 +449,7 @@ namespace DLeader.Consul.Tests.Implementations
 
             _kvEndpointMock
                 .Setup(x => x.Get(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new QueryResult<KVPair> { Response = null });
+                .ReturnsAsync(new QueryResult<KVPair> { Response = null! });
 
             // Act
             var result = await leaderElection.GetCurrentLeaderAsync();
@@ -486,9 +490,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Error,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error during async disposal")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Error during async disposal")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Once);
         }
 
@@ -512,9 +516,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Error,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error in leader election loop")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Error in leader election loop")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Once);
         }
 
@@ -539,6 +543,7 @@ namespace DLeader.Consul.Tests.Implementations
                 {
                     Response = new KVPair(_lockKey)
                     {
+                        Session = _testSessionId,
                         Value = Encoding.UTF8.GetBytes(leaderElection.InstanceId)
                     }
                 });
@@ -638,9 +643,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Error,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Error renewing session")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Error renewing session")),
                     It.Is<Exception>(ex => ex.Message == "Session renewal failed"),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.AtLeastOnce);
 
             // Verificar que se intentó renovar la sesión
@@ -709,8 +714,7 @@ namespace DLeader.Consul.Tests.Implementations
                 // Tercera llamada para VerifyServiceRegistrationAsync - null response
                 .ReturnsAsync(new QueryResult<Dictionary<string, AgentService>> 
                 { 
-                    Response = null 
-                })
+                    Response = null!                })
                 // Cuarta llamada - servicio encontrado
                 .ReturnsAsync(new QueryResult<Dictionary<string, AgentService>>
                 {
@@ -739,9 +743,9 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Warning,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Consul returned null response when querying services")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Consul returned null response when querying services")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Once);
         }
 
@@ -786,18 +790,18 @@ namespace DLeader.Consul.Tests.Implementations
                 x => x.Log(
                     LogLevel.Warning,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains("Service not found in verification attempt")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("Service not found in verification attempt")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Exactly(_consulOptions.VerificationRetries));
 
             _loggerMock.Verify(
                 x => x.Log(
                     LogLevel.Warning,
                     It.IsAny<EventId>(),
-                    It.Is<It.IsAnyType>((v, t) => v.ToString().Contains($"Service verification did not succeed after {_consulOptions.VerificationRetries} attempts")),
+                    It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains($"Service verification did not succeed after {_consulOptions.VerificationRetries} attempts")),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()),
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
                 Times.Once);
         }
     }

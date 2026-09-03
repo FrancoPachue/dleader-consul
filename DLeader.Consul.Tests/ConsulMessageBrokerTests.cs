@@ -210,7 +210,7 @@ namespace DLeader.Consul.Tests.Implementations
                     It.IsAny<EventId>(),
                     It.IsAny<It.IsAnyType>(),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()
                 ),
                 Times.Once
             );
@@ -240,15 +240,17 @@ namespace DLeader.Consul.Tests.Implementations
                     It.IsAny<EventId>(),
                     It.IsAny<It.IsAnyType>(),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()
                 ),
                 Times.AtLeastOnce
             );
         }
 
         [Fact]
-        public void Dispose_ShouldCancelBackgroundTasksAndDisposeResources()
+        public void Dispose_ShouldNotDisposeTheInjectedConsulClient()
         {
+            // El cliente se registra como singleton y lo comparten el broker y la
+            // eleccion de lider, asi que disponerlo aca romperia al otro consumidor.
             // Arrange
             var broker = CreateMessageBroker();
 
@@ -256,7 +258,7 @@ namespace DLeader.Consul.Tests.Implementations
             broker.Dispose();
 
             // Assert
-            _consulClientMock.Verify(x => x.Dispose(), Times.Once);
+            _consulClientMock.Verify(x => x.Dispose(), Times.Never);
         }
 
         private ConsulMessageBroker CreateMessageBroker()
