@@ -168,17 +168,18 @@ frozen.
 **A distributed lock alone does not give you mutual exclusion.** This is not specific to
 Consul or to this library. The argument is Martin Kleppmann's, in
 [*How to do distributed locking*](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html)
-(2016), and it applies to every lock service, this one included:
+(2016), and it applies to every lock service, this one included.
 
-> A client holding a lock can be paused — by a GC pause, a page fault, a scheduler
-> preemption — for longer than the lock's lease. The lock expires, another client
-> acquires it, and then the first client wakes up and, still believing it holds the
-> lock, writes to the shared resource.
+In summary: a client holding a lock can be paused — by a garbage-collection pause, a
+page fault, a scheduler preemption — for longer than the lock's lease. The lock expires,
+another client acquires it, and the first client resumes still believing it holds the
+lock, and writes.
 
 No amount of checking closes that window, because the paused process cannot check
 anything while paused. The fix is not a better lock. The fix is that **the resource must
 reject stale writers**, and to do that it needs a monotonically increasing token from
-the lock — a *fencing token*.
+the lock — a *fencing token*. Kleppmann's article is worth reading in full; the summary
+above is ours, not his words.
 
 Concretely, this library does **not** guarantee that:
 
