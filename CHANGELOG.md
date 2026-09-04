@@ -58,7 +58,8 @@ API that can be used correctly, and the one that could not is marked obsolete.
   are enabled repo-wide. The build went from 69 warnings to zero.
 - CI now runs on every push and pull request, not only on release tags, and publishing
   to NuGet is gated on those runs passing. The tag is checked against the project
-  version before publishing.
+  version before publishing, so a tag that disagrees with `<Version>` fails the release
+  rather than shipping a surprise.
 - The sample application uses the lease API throughout.
 
 ### Deprecated
@@ -139,9 +140,10 @@ API that can be used correctly, and the one that could not is marked obsolete.
 
 ## [1.10.0] - 2025-02
 
-Earlier releases are not documented here. `1.10.0` was published to NuGet as `1.10`
-because the release tag was `v1.10` and the workflow derived the package version from
-the tag; the project file still said `1.0.0`. Both are corrected in 1.11.0.
+Earlier releases are not documented here. The release tag was `v1.10` and the workflow
+derived the package version from it, which NuGet normalised to `1.10.0` — so the
+published version is correct. The project file, however, still said `1.0.0`, which is
+fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 
 [Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...HEAD
 [1.11.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.10...v1.11.0
