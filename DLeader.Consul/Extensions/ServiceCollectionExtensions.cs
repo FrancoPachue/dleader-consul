@@ -63,7 +63,10 @@ namespace DLeader.Consul.Extensions
             // Messaging doesn't strictly need ServiceRegistrationOptions, but needs ConsulOptions
             AddConsulCore(services, configureConsul, null);
 
-            services.TryAddSingleton<IMessageBroker>(sp => 
+            // Registering a type this package deprecates, on purpose: it still ships and
+            // still works until 2.0 moves it to its own package.
+#pragma warning disable CS0618
+            services.TryAddSingleton<IMessageBroker>(sp =>
             {
                 var consulClient = sp.GetRequiredService<IConsulClient>();
                 var logger = sp.GetRequiredService<ILogger<ConsulMessageBroker>>();

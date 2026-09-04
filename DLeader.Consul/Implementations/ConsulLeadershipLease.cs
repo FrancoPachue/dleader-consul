@@ -1,5 +1,6 @@
 using Consul;
 using DLeader.Consul.Abstractions;
+using DLeader.Consul.Diagnostics;
 using Microsoft.Extensions.Logging;
 using System.Text;
 
@@ -39,6 +40,18 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
     /// <summary>Monotonic timestamp of the last successful session renewal.</summary>
     private long _lastRenewalTicks;
 
+    /// <summary>Monotonic timestamp of acquisition, for the tenure histogram.</summary>
+    private readonly long _acquiredAtTicks = Environment.TickCount64;
+
+    /// <summary>
+    /// The loss reason, stored as the enum value plus one so that 0 means "still held".
+    /// An int because three loops race to set it and only the first should win.
+    /// </summary>
+    private int _lostReason;
+
+    /// <summary>Service name, carried purely as a metric tag.</summary>
+    private readonly string _serviceName;
+
     private Task? _renewalLoop;
     private Task? _watchdogLoop;
     private Task? _watchLoop;
@@ -50,12 +63,23 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
     /// <inheritdoc />
     public long FencingToken { get; }
 
+    /// <inheritdoc />
+    public LeadershipLostReason? LostReason
+    {
+        get
+        {
+            var stored = Volatile.Read(ref _lostReason);
+            return stored == 0 ? null : (LeadershipLostReason)(stored - 1);
+        }
+    }
+
     internal ConsulLeadershipLease(
         IConsulClient consulClient,
         ILogger logger,
         string lockKey,
         string instanceId,
         string sessionId,
+        string serviceName,
         long fencingToken,
         ulong acquiredAtIndex,
         TimeSpan ttl,
@@ -67,6 +91,7 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
         _lockKey = lockKey;
         _instanceId = instanceId;
         _sessionId = sessionId;
+        _serviceName = serviceName;
         _ttl = ttl;
         FencingToken = fencingToken;
 
@@ -111,6 +136,10 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
 
                 Interlocked.Exchange(ref _lastRenewalTicks, Environment.TickCount64);
                 delay = normalInterval;
+
+                LeadershipTelemetry.Renewals.Add(1,
+                    new KeyValuePair<string, object?>("service", _serviceName),
+                    new KeyValuePair<string, object?>("outcome", "ok"));
             }
             catch (OperationCanceledException)
             {
@@ -118,12 +147,12 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
             }
             catch (SessionExpiredException ex)
             {
-                MarkLost("Consul reports the session as expired: " + ex.Message);
+                MarkLost(LeadershipLostReason.SessionExpired, "Consul reports the session as expired: " + ex.Message);
                 break;
             }
             catch (ConsulRequestException ex) when (IsSessionGone(ex))
             {
-                MarkLost("Consul rejected the renewal as an invalid session: " + ex.Message);
+                MarkLost(LeadershipLostReason.SessionExpired, "Consul rejected the renewal as an invalid session: " + ex.Message);
                 break;
             }
             catch (Exception ex)
@@ -135,6 +164,12 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
                     "Session renewal failed for lease {SessionId} on {InstanceId}; retrying in {Delay}",
                     _sessionId, _instanceId, retryInterval);
                 delay = retryInterval;
+
+                // A rising failure count with no corresponding loss is the early warning
+                // that the margin is being eaten into.
+                LeadershipTelemetry.Renewals.Add(1,
+                    new KeyValuePair<string, object?>("service", _serviceName),
+                    new KeyValuePair<string, object?>("outcome", "failed"));
             }
         }
     }
@@ -165,6 +200,7 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
             if (sinceRenewal >= (long)_localDeadline.TotalMilliseconds)
             {
                 MarkLost(
+                    LeadershipLostReason.LocalDeadlineExceeded,
                     "no session renewal succeeded in " + sinceRenewal +
                     " ms, which exceeds the local deadline of " +
                     _localDeadline.TotalMilliseconds + " ms");
@@ -200,13 +236,14 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
 
                 if (result.Response is null)
                 {
-                    MarkLost("the lock key no longer exists");
+                    MarkLost(LeadershipLostReason.LockKeyTaken, "the lock key no longer exists");
                     break;
                 }
 
                 if (!string.Equals(result.Response.Session, _sessionId, StringComparison.Ordinal))
                 {
                     MarkLost(
+                        LeadershipLostReason.LockKeyTaken,
                         "the lock key is no longer held by this session (now held by " +
                         (result.Response.Session ?? "nobody") + ")");
                     break;
@@ -236,16 +273,30 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
         }
     }
 
-    private void MarkLost(string reason)
+    private void MarkLost(LeadershipLostReason reason, string detail)
     {
-        if (_lostCts.IsCancellationRequested)
+        // Only the first detector to fire owns the reason. Three loops race to call
+        // this, and the one that got there first is the one that actually decided.
+        if (Interlocked.CompareExchange(ref _lostReason, (int)reason + 1, 0) != 0)
         {
             return;
         }
 
         _logger.LogWarning(
-            "Leadership lease lost by {InstanceId} (fencing token {FencingToken}): {Reason}",
-            _instanceId, FencingToken, reason);
+            "Leadership lease lost by {InstanceId} (fencing token {FencingToken}, reason {Reason}): {Detail}",
+            _instanceId, FencingToken, reason, detail);
+
+        LeadershipTelemetry.Losses.Add(1,
+            new KeyValuePair<string, object?>("service", _serviceName),
+            new KeyValuePair<string, object?>("reason", ReasonTag(reason)));
+
+        LeadershipTelemetry.Held.Add(-1,
+            new KeyValuePair<string, object?>("service", _serviceName));
+
+        LeadershipTelemetry.Tenure.Record(
+            (Environment.TickCount64 - _acquiredAtTicks) / 1000.0,
+            new KeyValuePair<string, object?>("service", _serviceName),
+            new KeyValuePair<string, object?>("reason", ReasonTag(reason)));
 
         try
         {
@@ -256,6 +307,20 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
             // Raced with disposal; the lease is going away anyway.
         }
     }
+
+    /// <summary>
+    /// Stable, low-cardinality tag values. The enum names would work, but pinning them
+    /// here means renaming the enum cannot silently break someone's dashboard.
+    /// </summary>
+    private static string ReasonTag(LeadershipLostReason reason) => reason switch
+    {
+        LeadershipLostReason.SessionExpired => "session_expired",
+        LeadershipLostReason.LocalDeadlineExceeded => "local_deadline_exceeded",
+        LeadershipLostReason.LockKeyTaken => "lock_key_taken",
+        LeadershipLostReason.Released => "released",
+        LeadershipLostReason.Cancelled => "cancelled",
+        _ => "unknown"
+    };
 
     /// <summary>
     /// True when the exception is Consul rejecting an operation because the session no
@@ -274,6 +339,13 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
         {
             return;
         }
+
+        // Records the term and decrements the held gauge, unless a detector already did.
+        // Cancelled rather than Released when the caller's token went first, so the
+        // metrics distinguish an orderly hand-off from a host shutting down.
+        MarkLost(
+            _lostToken.IsCancellationRequested ? LeadershipLostReason.Cancelled : LeadershipLostReason.Released,
+            "the lease was disposed");
 
         try
         {

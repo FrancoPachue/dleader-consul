@@ -126,7 +126,7 @@ While `lease.LostToken` has not been cancelled:
 
 | Assumption | If it does not hold |
 |---|---|
-| The Consul cluster keeps a quorum. | No leases are granted. Existing leases expire at their TTL. Availability is lost; safety is not. |
+| The Consul cluster keeps a quorum. | No leases are granted, and the holder stands down on its local deadline because its renewals cannot be committed either. Availability is lost; safety is not. Covered by a test against a three-server cluster with two servers stopped. |
 | The Consul cluster is not restored from a snapshot or rebuilt. | Raft indices can move backwards, so a new leader's fencing token may be *lower* than an old one's. Guarantee 2 breaks. This is the one failure mode where fencing itself stops protecting you. |
 | Only this library writes to `service/{ServiceName}/leader`. | Anything else writing that key can move the lock or the index arbitrarily. |
 | The process is scheduled often enough to run its own watchdog. | Cancellation of `LostToken` is delayed by however long the process was frozen. See below. |
@@ -303,6 +303,35 @@ builder.Services.AddConsulLeaderElection(
 
 ---
 
+## Observability
+
+The library publishes an `ActivitySource` and a `Meter`, both named `DLeader.Consul`:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(t => t.AddSource(LeadershipTelemetry.ActivitySourceName))
+    .WithMetrics(m => m.AddMeter(LeadershipTelemetry.MeterName));
+```
+
+| Instrument | |
+|---|---|
+| `dleader.consul.leadership.lost` | Losses, tagged by `reason`. **The one to alert on.** |
+| `dleader.consul.leadership.acquisitions` | Attempts, tagged `acquired` / `contended` / `failed`. |
+| `dleader.consul.leadership.held` | 1 while this process holds a lease. Summed across a fleet it should never exceed one per service. |
+| `dleader.consul.leadership.tenure` | How long each term lasted, in seconds. |
+| `dleader.consul.session.renewals` | Renewals, tagged `ok` / `failed`. Rising failures with no loss means the margin is being eaten into. |
+| `dleader.consul.leadership.fencing_token_issued` | Tokens issued. Alert on it going backwards — see the snapshot-restore assumption above. |
+
+The `reason` tag is why this exists:
+
+- `session_expired`, `lock_key_taken` — Consul made a decision and told this node.
+- `local_deadline_exceeded` — this node could not reach Consul and stood down on its own
+  clock. **This is what a network partition looks like from inside the process.** It is
+  a different incident from the first two and deserves a different alert.
+
+`ILeadershipLease.LostReason` exposes the same value in code, for callers that want to
+react differently to a partition than to an orderly hand-off.
+
 ## The older API
 
 `ILeaderElection` — `StartLeaderElectionAsync`, `OnLeadershipAcquired`,
@@ -315,23 +344,41 @@ A single `ConsulLeaderElection` instance uses one API or the other, never both �
 contend for the same key with separate sessions, and mixing them throws
 `InvalidOperationException`.
 
+**`ILeaderElection` is removed entirely in 2.0**, along with the Consul service
+registration that only it used, and `IMessageBroker` moves to a separate
+`DLeader.Consul.Messaging` package. [MIGRATION.md](MIGRATION.md) walks through moving to
+the lease API; doing it now makes 2.0 a version bump rather than a rewrite.
+
 ---
 
 ## Development
 
 ```bash
-dotnet build                                                   # net8.0, net9.0, net10.0
-dotnet test DLeader.Consul.Tests                               # unit, all targets
-dotnet test DLeader.Consul.IntegrationTests                    # needs Docker
+dotnet build                                                    # net8.0, net9.0, net10.0
+dotnet test DLeader.Consul.Tests                                # unit, all targets
+dotnet test DLeader.Consul.IntegrationTests \
+  --filter "Category!=Cluster"                                  # needs Docker
+dotnet test DLeader.Consul.IntegrationTests \
+  --filter "Category=Cluster" -f net8.0                         # 3-server cluster, slow
 ```
 
-Integration tests start a real Consul in a container through Testcontainers, run on all
-three targets, and cover contested acquisition, fencing-token monotonicity, loss
-detection when the session is destroyed, loss detection when the agent becomes
-unreachable, message delivery and de-duplication, and what the campaign path actually
-registers. They are the only tests that can tell you whether the guarantees above hold —
-every bug fixed in 1.11.0 was invisible to the mocked suite — so changes to the lease or
-broker paths need to go through them.
+Integration tests start real Consul containers through Testcontainers. They are the only
+tests that can tell you whether the guarantees above hold — every bug fixed in 1.11.0 was
+invisible to the mocked suite, and two more were found by these — so changes to the lease
+or broker paths need to go through them.
+
+Most run against a single agent and cover contested acquisition, fencing-token
+monotonicity, loss detection when the session is destroyed, loss detection when the agent
+becomes unreachable, ACL enforcement, message delivery and de-duplication, and what the
+campaign path registers.
+
+The `Cluster` category runs against **three Consul servers with real Raft**, and covers
+quorum loss, Raft leader failover, and fencing-token monotonicity across a Consul
+election. Those are the only tests that exercise what makes Consul strongly consistent —
+a single dev agent has no quorum to lose — so they are what backs the assumptions table
+above. They are slow by design: bootstrapping Raft and waiting out an election takes real
+time and cannot be faked. CI runs them once rather than per target framework, since
+nothing they test varies by framework.
 
 Requires the .NET 10 SDK to build (it produces all three targets) and Docker to run the
 integration suite.

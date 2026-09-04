@@ -61,7 +61,22 @@ jobs:
           dotnet test DLeader.Consul.IntegrationTests/DLeader.Consul.IntegrationTests.csproj
           --configuration Release
           --no-build
+          --filter "Category!=Cluster"
           --logger "trx;LogFileName=integration.trx"
+          --results-directory artifacts/test-results
+
+      - name: Cluster failure tests (three-server Consul, real Raft)
+        # Run once rather than per target framework. These bring up three Consul servers
+        # and wait out real Raft elections, and what they exercise is the library's
+        # interaction with a quorum - nothing about them varies by target framework, so
+        # running them three times would triple the slowest step for no added signal.
+        run: >
+          dotnet test DLeader.Consul.IntegrationTests/DLeader.Consul.IntegrationTests.csproj
+          --configuration Release
+          --no-build
+          --framework net8.0
+          --filter "Category=Cluster"
+          --logger "trx;LogFileName=cluster.trx"
           --results-directory artifacts/test-results
 
       - name: Coverage summary
