@@ -69,29 +69,16 @@ namespace DLeader.Consul.Configuration
         public string Datacenter { get; set; } = string.Empty;
 
         /// <summary>
-        /// Time-to-live for the session in seconds
+        /// Time-to-live for the Consul session backing a lease, in seconds. Consul
+        /// enforces a minimum of 10.
         /// </summary>
+        /// <remarks>
+        /// The session is renewed at half this interval. A lease that has not managed a
+        /// successful renewal within <c>SessionTTL - LeaseSafetyMarginSeconds</c>
+        /// declares itself lost, so this is also the outer bound on how long a
+        /// partitioned instance can keep believing it leads.
+        /// </remarks>
         public int SessionTTL { get; set; } = 10;
-
-        /// <summary>
-        /// Interval in seconds to check for leadership changes
-        /// </summary>
-        public int LeaderCheckInterval { get; set; } = 5;
-
-        /// <summary>
-        /// Interval in seconds to renew the session
-        /// </summary>
-        public int RenewInterval { get; set; } = 5;
-
-        /// <summary>
-        /// Number of retries for service verification
-        /// </summary>
-        public int VerificationRetries { get; set; } = 3;
-
-        /// <summary>
-        /// Delay in seconds between verification retries
-        /// </summary>
-        public int VerificationRetryDelay { get; set; } = 1;
 
         /// <summary>
         /// Seconds Consul refuses to hand the lock to anyone else after the holding

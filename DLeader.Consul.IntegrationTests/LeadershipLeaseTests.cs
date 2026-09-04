@@ -210,21 +210,6 @@ public class LeadershipLeaseTests
         await leaseB!.DisposeAsync();
     }
 
-    [Fact]
-    public async Task MixingTheCampaignAndLeaseApis_Throws()
-    {
-        var serviceName = ConsulContainer.NewServiceName();
-        await using var node = _consul.CreateNode(serviceName, servicePort: 5001);
-
-        var lease = await node.TryAcquireLeadershipAsync();
-        Assert.NotNull(lease);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => node.StartLeaderElectionAsync(CancellationToken.None));
-
-        await lease!.DisposeAsync();
-    }
-
     // -----------------------------------------------------------------------------
 
     /// <summary>

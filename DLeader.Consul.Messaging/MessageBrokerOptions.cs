@@ -1,12 +1,12 @@
-namespace DLeader.Consul.Configuration
+namespace DLeader.Consul.Messaging
 {
     /// <summary>
-    /// Retention and delivery settings for <see cref="Abstractions.IMessageBroker"/>.
+    /// Retention and delivery settings for <see cref="IMessageBroker"/>.
     /// </summary>
     /// <remarks>
     /// These bound how long a message survives and how quickly a subscriber notices one.
     /// None of them turn the broker into a durable queue: see
-    /// <see cref="Abstractions.IMessageBroker"/> for what it does and does not promise.
+    /// <see cref="IMessageBroker"/> for what it does and does not promise.
     /// </remarks>
     public class MessageBrokerOptions
     {

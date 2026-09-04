@@ -7,7 +7,7 @@ using DotNet.Testcontainers.Networks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
-namespace DLeader.Consul.IntegrationTests;
+namespace DLeader.Consul.ClusterTests;
 
 /// <summary>
 /// Three Consul servers with real Raft consensus.
@@ -199,6 +199,34 @@ public sealed class ConsulCluster : IAsyncLifetime
     private readonly HashSet<int> _stopped = new();
 
     /// <summary>
+    /// Waits until the Raft leader can be resolved to a server index, and returns it.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="GetLeaderIndexAsync"/> answers from a single point in time and returns
+    /// -1 whenever the answer is not available yet — during an election, or while the
+    /// catalog has not caught up. Asserting on one reading makes a test that passes on
+    /// an idle machine and fails on a busy one. Every caller wants "the leader, once
+    /// there is one", so that is what this provides.
+    /// </remarks>
+    public async Task<int> WaitForLeaderIndexAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            var index = await GetLeaderIndexAsync();
+            if (index >= 0)
+            {
+                return index;
+            }
+
+            await Task.Delay(500);
+        }
+
+        throw new TimeoutException($"Could not resolve the Raft leader within {timeout}.");
+    }
+
+    /// <summary>
     /// Waits until the cluster reports a Raft leader that is not
     /// <paramref name="excluding"/>, and returns its index.
     /// </summary>
@@ -266,7 +294,6 @@ public sealed class ConsulCluster : IAsyncLifetime
         return new ConsulLeaderElection(
             NullLogger<ConsulLeaderElection>.Instance,
             Options.Create(consulOptions),
-            Options.Create(new ServiceRegistrationOptions { ServicePort = servicePort }),
             CreateClient(serverIndex));
     }
 

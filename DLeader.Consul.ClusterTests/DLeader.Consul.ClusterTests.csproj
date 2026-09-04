@@ -1,26 +1,25 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- Mirrors the library's targets so the unit suite proves it works on each of
-         them, not just on the lowest. -->
-    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <!-- One target framework, not three. What these exercise is the library's
+         interaction with a Consul quorum; nothing about it varies by framework, and
+         each run brings up three servers and waits out real Raft elections. -->
+    <TargetFramework>net8.0</TargetFramework>
 
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="coverlet.collector" Version="6.0.4" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.19" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
-    <PackageReference Include="Moq" Version="4.20.72" />
+    <PackageReference Include="Testcontainers" Version="4.14.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.0.2" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DLeader.Consul\DLeader.Consul.csproj" />
-    <ProjectReference Include="..\DLeader.Consul.Messaging\DLeader.Consul.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>

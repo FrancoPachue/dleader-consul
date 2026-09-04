@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DLeader.Consul\DLeader.Consul.csproj" />
+    <ProjectReference Include="..\DLeader.Consul.Messaging\DLeader.Consul.Messaging.csproj" />
   </ItemGroup>
 
   <ItemGroup>

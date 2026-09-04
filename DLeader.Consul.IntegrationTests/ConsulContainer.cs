@@ -108,9 +108,7 @@ public sealed class ConsulContainer : IAsyncLifetime
     public static ConsulLeaderElection CreateNodeWithOwnClient(
         ConsulOptions consulOptions,
         int servicePort) =>
-        new(NullLogger<ConsulLeaderElection>.Instance,
-            Options.Create(consulOptions),
-            Options.Create(new ServiceRegistrationOptions { ServicePort = servicePort }));
+        new(NullLogger<ConsulLeaderElection>.Instance, Options.Create(consulOptions));
 
     /// <summary>
     /// Builds an instance pointed at this container. <paramref name="servicePort"/> is
@@ -134,12 +132,9 @@ public sealed class ConsulContainer : IAsyncLifetime
             LeaseSafetyMarginSeconds = safetyMarginSeconds
         };
 
-        var serviceOptions = new ServiceRegistrationOptions { ServicePort = servicePort };
-
         return new ConsulLeaderElection(
             logger ?? NullLogger<ConsulLeaderElection>.Instance,
             Options.Create(consulOptions),
-            Options.Create(serviceOptions),
             CreateClient());
     }
 

@@ -61,21 +61,19 @@ jobs:
           dotnet test DLeader.Consul.IntegrationTests/DLeader.Consul.IntegrationTests.csproj
           --configuration Release
           --no-build
-          --filter "Category!=Cluster"
           --logger "trx;LogFileName=integration.trx"
           --results-directory artifacts/test-results
 
       - name: Cluster failure tests (three-server Consul, real Raft)
-        # Run once rather than per target framework. These bring up three Consul servers
-        # and wait out real Raft elections, and what they exercise is the library's
-        # interaction with a quorum - nothing about them varies by target framework, so
-        # running them three times would triple the slowest step for no added signal.
+        # A separate project, and therefore a separate run, on purpose. Each of these
+        # brings up three Consul servers and waits out real Raft elections; sharing a
+        # run with the other suite means a dozen containers competing while elections
+        # are timing out, which produced failures that vanished when the tests were run
+        # alone. A filter would have expressed the same intent and been forgotten.
         run: >
-          dotnet test DLeader.Consul.IntegrationTests/DLeader.Consul.IntegrationTests.csproj
+          dotnet test DLeader.Consul.ClusterTests/DLeader.Consul.ClusterTests.csproj
           --configuration Release
           --no-build
-          --framework net8.0
-          --filter "Category=Cluster"
           --logger "trx;LogFileName=cluster.trx"
           --results-directory artifacts/test-results
 
@@ -115,11 +113,15 @@ jobs:
           retention-days: 14
 
       - name: Pack
-        run: >
-          dotnet pack DLeader.Consul/DLeader.Consul.csproj
-          --configuration Release
-          --no-build
-          --output artifacts/packages
+        # Two packages since 2.0: messaging was split out of the leadership package.
+        run: |
+          set -euo pipefail
+          for project in DLeader.Consul DLeader.Consul.Messaging; do
+            dotnet pack "$project/$project.csproj" \
+              --configuration Release \
+              --no-build \
+              --output artifacts/packages
+          done
 
       - name: Upload package
         uses: actions/upload-artifact@v7
@@ -162,16 +164,24 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF#refs/tags/v}"
-          project=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' DLeader.Consul/DLeader.Consul.csproj | head -1)
-          echo "tag=$tag project=$project"
-          if [ -z "$project" ]; then
-            echo "::error::Could not read <Version> from DLeader.Consul/DLeader.Consul.csproj"
-            exit 1
-          fi
-          if [ "$tag" != "$project" ]; then
-            echo "::error::Tag v$tag does not match <Version>$project</Version> in DLeader.Consul.csproj"
-            exit 1
-          fi
+
+          # Both packages are versioned and released together. Checking only one would
+          # let them drift, and a consumer who takes a matched pair from one tag should
+          # get a matched pair.
+          for project in DLeader.Consul DLeader.Consul.Messaging; do
+            version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' "$project/$project.csproj" | head -1)
+            echo "tag=$tag $project=$version"
+
+            if [ -z "$version" ]; then
+              echo "::error::Could not read <Version> from $project/$project.csproj"
+              exit 1
+            fi
+
+            if [ "$tag" != "$version" ]; then
+              echo "::error::Tag v$tag does not match <Version>$version</Version> in $project.csproj"
+              exit 1
+            fi
+          done
 
       - name: Download package
         uses: actions/download-artifact@v8
@@ -200,9 +210,14 @@ jobs:
           user: FrancoPachu
 
       - name: Push to NuGet
-        # No --skip-duplicate: a version that is already published means the version was
-        # not bumped, and that should fail loudly rather than pass green having done
-        # nothing.
+        # Pushes both packages. No --skip-duplicate: a version that is already published
+        # means the version was not bumped, and that should fail loudly rather than pass
+        # green having done nothing.
+        #
+        # The trusted publishing policy must cover both package ids. A policy scoped to
+        # the glob "DLeader.Consul" with "push only new package versions" refuses
+        # DLeader.Consul.Messaging, which is a new id - widen the glob to
+        # "DLeader.Consul*" and allow new packages for the first release of it.
         run: >
           dotnet nuget push "artifacts/packages/*.nupkg"
           --source https://api.nuget.org/v3/index.json
