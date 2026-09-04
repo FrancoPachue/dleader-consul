@@ -106,13 +106,20 @@ jobs:
             10.0.x
 
       - name: Check the tag matches the project version
-        # A tag of v1.10 against a project version of 1.0.0 is how 1.10.0 ended up
-        # published as 1.10. Catch the mismatch here rather than on nuget.org.
+        # The tag drove the package version while <Version> said something else
+        # entirely, so the two could disagree without anything noticing. This is the
+        # only thing standing between a wrong tag and an irreversible push to NuGet,
+        # so it uses sed rather than grep -P: PCRE support depends on the locale, and
+        # a guard that fails to run on some runners is not a guard.
         run: |
           set -euo pipefail
           tag="${GITHUB_REF#refs/tags/v}"
-          project=$(grep -oPm1 '(?<=<Version>)[^<]+' DLeader.Consul/DLeader.Consul.csproj)
+          project=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' DLeader.Consul/DLeader.Consul.csproj | head -1)
           echo "tag=$tag project=$project"
+          if [ -z "$project" ]; then
+            echo "::error::Could not read <Version> from DLeader.Consul/DLeader.Consul.csproj"
+            exit 1
+          fi
           if [ "$tag" != "$project" ]; then
             echo "::error::Tag v$tag does not match <Version>$project</Version> in DLeader.Consul.csproj"
             exit 1
