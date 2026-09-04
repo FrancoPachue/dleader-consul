@@ -66,6 +66,12 @@ absent.
 
 ## [1.11.0] - 2026-09-03
 
+> **Tagged but never published.** The release run failed at the push step with a `403`:
+> the stored NuGet API key had expired. Everything below shipped in 1.12.0 instead, so
+> nuget.org goes from 1.10.0 straight to 1.12.0 and there is no 1.11.0 package. The
+> underlying cause is fixed — releases now use trusted publishing and have no key to
+> expire.
+
 The release that makes the guarantees explicit. Nothing public was removed or changed
 shape, so this is a minor version, but the safety story is different: there is now an
 API that can be used correctly, and the one that could not is marked obsolete.
