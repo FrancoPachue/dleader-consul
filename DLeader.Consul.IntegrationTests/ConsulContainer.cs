@@ -24,11 +24,35 @@ public sealed class ConsulContainer : IAsyncLifetime
 
     public string Address { get; private set; } = string.Empty;
 
+    /// <summary>
+    /// When set, the agent starts with ACLs enabled, a default policy of deny, and this
+    /// value as the management token. Anything presenting a different token, or none,
+    /// is refused.
+    /// </summary>
+    public string? ManagementToken { get; init; }
+
+    /// <summary>The datacenter a dev-mode agent runs in.</summary>
+    public const string Datacenter = "dc1";
+
     public async Task InitializeAsync()
     {
-        _container = new ContainerBuilder(Image)
+        var builder = new ContainerBuilder(Image)
             .WithPortBinding(HttpPort, assignRandomHostPort: true)
-            .WithCommand("agent", "-dev", "-client=0.0.0.0")
+            .WithCommand("agent", "-dev", "-client=0.0.0.0");
+
+        if (ManagementToken is not null)
+        {
+            // CONSUL_LOCAL_CONFIG is how the official image takes extra configuration.
+            // default_policy=deny is the point: without it an unauthenticated request
+            // would still succeed and the test would prove nothing.
+            var json =
+                "{\"acl\":{\"enabled\":true,\"default_policy\":\"deny\"," +
+                "\"tokens\":{\"initial_management\":\"" + ManagementToken + "\"}}}";
+
+            builder = builder.WithEnvironment("CONSUL_LOCAL_CONFIG", json);
+        }
+
+        _container = builder
             .WithWaitStrategy(
                 Wait.ForUnixContainer()
                     .UntilHttpRequestIsSucceeded(r => r
@@ -52,7 +76,41 @@ public sealed class ConsulContainer : IAsyncLifetime
     public Task StopAgentAsync() => _container.StopAsync();
 
     public IConsulClient CreateClient() =>
-        new ConsulClient(cfg => cfg.Address = new Uri(Address));
+        new ConsulClient(cfg =>
+        {
+            cfg.Address = new Uri(Address);
+
+            if (ManagementToken is not null)
+            {
+                cfg.Token = ManagementToken;
+            }
+        });
+
+    /// <summary>
+    /// Options pointed at this container, with nothing filled in that a test does not
+    /// need. Used by the tests that exercise how the library builds its own client,
+    /// which is the path <see cref="CreateClient"/> bypasses.
+    /// </summary>
+    public ConsulOptions CreateOptions(string serviceName) => new()
+    {
+        ServiceName = serviceName,
+        Address = Address,
+        SessionTTL = 10,
+        LockDelaySeconds = 1,
+        LeaseSafetyMarginSeconds = 2
+    };
+
+    /// <summary>
+    /// Builds an instance that constructs its own Consul client from
+    /// <paramref name="consulOptions"/>, rather than being handed one. This is the path
+    /// that applies the ACL token and datacenter, so it is the only way to test them.
+    /// </summary>
+    public static ConsulLeaderElection CreateNodeWithOwnClient(
+        ConsulOptions consulOptions,
+        int servicePort) =>
+        new(NullLogger<ConsulLeaderElection>.Instance,
+            Options.Create(consulOptions),
+            Options.Create(new ServiceRegistrationOptions { ServicePort = servicePort }));
 
     /// <summary>
     /// Builds an instance pointed at this container. <paramref name="servicePort"/> is

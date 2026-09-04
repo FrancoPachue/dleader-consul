@@ -106,10 +106,7 @@ public class ConsulLeaderElection :
         _lockKey = $"service/{_options.ServiceName}/leader";
         _cts = new CancellationTokenSource();
 
-        _consulClient = consulClient ?? new ConsulClient(config =>
-        {
-            config.Address = new Uri(_options.Address);
-        });
+        _consulClient = consulClient ?? ConsulClientFactory.Create(_options);
     }
 
     // ---------------------------------------------------------------------------
@@ -215,6 +212,66 @@ public class ConsulLeaderElection :
 
             _logger.LogError(ex, "Error acquiring leadership lease for {InstanceId}", _instanceId);
             throw new LeadershipException("Failed to acquire leadership lease", ex);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<ILeadershipLease> AcquireLeadershipAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var lease = await TryAcquireLeadershipAsync(cancellationToken);
+            if (lease is not null)
+            {
+                return lease;
+            }
+
+            await WaitForLockKeyToChangeAsync(cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Blocks until the lock key changes, or until the lock delay could plausibly have
+    /// elapsed, whichever comes first.
+    /// </summary>
+    /// <remarks>
+    /// A blocking query means a follower takes over the moment the leader releases,
+    /// instead of up to one poll interval later. The timeout matters as much as the
+    /// query: after the holder fails, Consul refuses the lock for the lock-delay window
+    /// without the key changing at all, so waiting only on a change would sit there
+    /// until the query timed out. Waking around the end of that window retries at
+    /// roughly the first moment acquisition can succeed.
+    /// </remarks>
+    private async Task WaitForLockKeyToChangeAsync(CancellationToken cancellationToken)
+    {
+        var waitTime = TimeSpan.FromSeconds(Math.Clamp(_options.LockDelaySeconds + 1, 1, 60));
+
+        try
+        {
+            var current = await _consulClient.KV.Get(_lockKey, cancellationToken);
+
+            var options = new QueryOptions
+            {
+                WaitIndex = current.LastIndex,
+                WaitTime = waitTime
+            };
+
+            await _consulClient.KV.Get(_lockKey, options, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Consul being unreachable is not a reason to spin.
+            _logger.LogDebug(ex, "Waiting on lock key {LockKey} failed; backing off", _lockKey);
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
         }
     }
 

@@ -5,7 +5,7 @@
 
     <!-- NuGet Package Information -->
     <PackageId>DLeader.Consul</PackageId>
-    <Version>1.11.0</Version>
+    <Version>1.12.0</Version>
     <Authors>FrancoPachue</Authors>
     <Description>Distributed leader election for .NET on HashiCorp Consul, with leases that carry a fencing token and signal loss of leadership through a cancellation token.</Description>
     <PackageTags>consul;leader-election;distributed-systems;dotnet;microservices;distributed-lock;fencing-token</PackageTags>

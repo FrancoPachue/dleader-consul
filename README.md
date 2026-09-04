@@ -48,14 +48,10 @@ public sealed class InvoiceWorker : BackgroundService
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            await using var lease = await _leases.TryAcquireLeadershipAsync(stoppingToken);
-
-            if (lease is null)
-            {
-                // Someone else leads, or Consul's lock delay has not elapsed.
-                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
-                continue;
-            }
+            // Waits on a blocking query rather than polling, so this takes over the
+            // moment the lock is free. Use TryAcquireLeadershipAsync instead when the
+            // instance has follower work to do rather than idling.
+            await using var lease = await _leases.AcquireLeadershipAsync(stoppingToken);
 
             // Work stops when leadership is lost as well as when the host shuts down.
             using var work = CancellationTokenSource.CreateLinkedTokenSource(
@@ -245,6 +241,8 @@ There is no fourth option where the lock alone makes it safe.
 |---|---|---|
 | `ServiceName` | *(required)* | Scopes the lock key: `service/{ServiceName}/leader`. |
 | `Address` | `http://localhost:8500` | Consul agent HTTP address. |
+| `AclToken` | *(empty)* | ACL token. Required on a cluster with ACLs enabled — without one every call is rejected. See below. |
+| `Datacenter` | *(empty)* | Pins the expected datacenter so a misconfigured agent fails loudly. Does not enable cross-datacenter election, which is not possible here. |
 | `SessionTTL` | `10` | Session lifetime in seconds. Consul enforces a minimum of 10. |
 | `LockDelaySeconds` | `15` | Seconds Consul refuses the lock to anyone after an invalidation. The main safety/failover dial. `0` removes the guard. |
 | `LeaseSafetyMarginSeconds` | `2` | Subtracted from `SessionTTL` to get the local deadline at which a lease declares itself lost. Must be `> 0` and `< SessionTTL`. |
@@ -279,6 +277,21 @@ Only used by the campaign API, which registers this instance as a Consul service
 | `Retention` | `5 min` | How long a published message survives before the sweep deletes it. |
 | `CleanupInterval` | `1 min` | How often expired messages are swept. |
 | `WatchTimeout` | `1 min` | Long-poll timeout for the watch. Not a delivery delay — Consul answers as soon as something changes; lowering it only adds idle requests. |
+
+### Running against a cluster with ACLs enabled
+
+Set `AclToken`. The minimum policy the lease API needs:
+
+```hcl
+key_prefix "service/<name>/leader" { policy = "write" }
+session_prefix ""                  { policy = "write" }
+```
+
+The campaign API additionally needs `service_prefix "<name>"` with write, and the
+message broker needs `key_prefix "messages/<name>/"` with write.
+
+The token is only applied to clients this library constructs. If you register your own
+`IConsulClient`, configure the token on it yourself.
 
 Bind from `appsettings.json` the usual way:
 

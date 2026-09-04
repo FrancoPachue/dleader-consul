@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-04
+
+Closes the gaps opened as issues alongside 1.11.0.
+
+### Added
+
+- `ConsulOptions.AclToken` ([#2]). Without it the library was unusable against a
+  cluster with ACLs enabled — the posture Consul recommends — because every KV and
+  session call was rejected and there was no way to supply a token short of registering
+  your own `IConsulClient`. The README documents the minimum policy. The token is never
+  logged.
+- `ConsulOptions.Datacenter` ([#3]), for pinning the expected datacenter so a
+  misconfigured agent fails loudly instead of quietly electing a leader elsewhere. It
+  does not enable cross-datacenter election, and the documentation says why that is not
+  possible: Consul does not replicate the KV store between datacenters, sessions are
+  datacenter-scoped, and a fencing token from one datacenter's Raft index is meaningless
+  in another.
+- `ILeadershipLeaseProvider.AcquireLeadershipAsync` ([#5]), which waits until it wins
+  instead of returning `null`. The Consul implementation waits on a blocking query
+  against the lock key, so a follower takes over the moment the lock is released rather
+  than at the next poll. Added as a default interface method with a polling fallback, so
+  existing implementations of the interface keep compiling.
+- CI writes a coverage summary to the job summary ([#6]).
+
+### Fixed
+
+- Both places the library builds a Consul client now go through one factory. They
+  configured it separately before, which is how a new setting could reach one and not
+  the other.
+- The integration test project referenced no coverage collector, so collecting coverage
+  there silently produced an empty directory.
+
+### Changed
+
+- GitHub Actions bumped to current majors, clearing the Node 20 deprecation warnings.
+- Integration tests cover the new surface against a real Consul, including an
+  ACL-enabled agent with `default_policy = "deny"` — testing an ACL token against an
+  agent that permits everything would prove nothing.
+
+### Notes
+
+No coverage threshold was added despite [#6] asking for one. Instrumenting the
+integration suite takes it from about 45 seconds to over 15 minutes, and several of
+those tests assert on elapsed time, so instrumentation risks changing what it measures.
+That leaves the unit suite as the only thing measurable in CI — and since most of this
+library's real coverage comes from the integration tests, gating on that number would
+fail honest changes while passing the kind of bug this library actually shipped, which
+lived in an uncovered catch block. The summary is published; the gate is deliberately
+absent.
+
 ## [1.11.0] - 2026-09-03
 
 The release that makes the guarantees explicit. Nothing public was removed or changed
@@ -145,6 +195,12 @@ derived the package version from it, which NuGet normalised to `1.10.0` — so t
 published version is correct. The project file, however, still said `1.0.0`, which is
 fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 
-[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.10...v1.11.0
 [1.10.0]: https://github.com/FrancoPachue/dleader-consul/releases/tag/v1.10
+
+[#2]: https://github.com/FrancoPachue/dleader-consul/issues/2
+[#3]: https://github.com/FrancoPachue/dleader-consul/issues/3
+[#5]: https://github.com/FrancoPachue/dleader-consul/issues/5
+[#6]: https://github.com/FrancoPachue/dleader-consul/issues/6

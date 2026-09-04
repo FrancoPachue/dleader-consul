@@ -10,6 +10,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Present so that coverage CAN be collected here on demand, but CI does not do it.
+         Instrumenting this suite takes it from about 45 seconds to over 15 minutes, and
+         several of these tests assert on elapsed time, so the instrumentation risks
+         changing the thing being measured. CI reports unit coverage only and says so. -->
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageReference Include="Testcontainers" Version="4.14.0" />

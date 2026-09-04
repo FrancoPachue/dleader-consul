@@ -104,13 +104,7 @@ namespace DLeader.Consul.Extensions
             services.TryAddSingleton<IConsulClient>(sp =>
             {
                 var options = sp.GetRequiredService<IOptions<ConsulOptions>>().Value;
-                return new ConsulClient(cfg =>
-                {
-                    if (!string.IsNullOrEmpty(options.Address))
-                    {
-                        cfg.Address = new Uri(options.Address);
-                    }
-                });
+                return ConsulClientFactory.Create(options);
             });
         }
     }

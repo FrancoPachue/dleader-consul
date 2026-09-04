@@ -22,6 +22,53 @@ namespace DLeader.Consul.Configuration
         public string Address { get; set; } = "http://localhost:8500";
 
         /// <summary>
+        /// ACL token presented to Consul. Empty means no token, which only works on a
+        /// cluster with ACLs disabled.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// With ACLs enabled — the posture Consul recommends for production — every KV
+        /// and session call is rejected without one.
+        /// </para>
+        /// <para>
+        /// The minimum policy the lease API needs is write on the lock key and on
+        /// sessions:
+        /// </para>
+        /// <code>
+        /// key_prefix "service/&lt;name&gt;/leader" { policy = "write" }
+        /// session_prefix ""                     { policy = "write" }
+        /// </code>
+        /// <para>
+        /// The campaign API additionally needs <c>service_prefix "&lt;name&gt;"</c> with
+        /// write, and the message broker needs
+        /// <c>key_prefix "messages/&lt;name&gt;/"</c> with write.
+        /// </para>
+        /// <para>
+        /// This value is a credential. It is never logged, and it is only applied to
+        /// clients this library constructs: supplying your own <c>IConsulClient</c>
+        /// means configuring the token on it yourself.
+        /// </para>
+        /// </remarks>
+        public string AclToken { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Consul datacenter to address. Empty means the agent's own datacenter.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Set this to pin the expected datacenter, so a misconfigured agent fails
+        /// loudly instead of quietly electing a leader somewhere else.
+        /// </para>
+        /// <para>
+        /// It does not enable leadership across datacenters, and nothing here can.
+        /// Consul does not replicate the KV store between datacenters, sessions are
+        /// datacenter-scoped, and a fencing token derived from one datacenter's Raft
+        /// index is meaningless in another. Elect a leader per datacenter.
+        /// </para>
+        /// </remarks>
+        public string Datacenter { get; set; } = string.Empty;
+
+        /// <summary>
         /// Time-to-live for the session in seconds
         /// </summary>
         public int SessionTTL { get; set; } = 10;

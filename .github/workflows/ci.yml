@@ -23,13 +23,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Source Link embeds commit information, which needs real history.
           fetch-depth: 0
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           # One SDK per target framework. The SDKs bring their runtimes, which the
           # multi-targeted test run needs in order to execute on all three.
@@ -64,9 +64,36 @@ jobs:
           --logger "trx;LogFileName=integration.trx"
           --results-directory artifacts/test-results
 
+      - name: Coverage summary
+        # Puts the numbers on the job summary, where someone might actually read them.
+        # An artifact nobody opens is not a measurement.
+        #
+        # Deliberately no threshold gate. This figure covers the unit suite only:
+        # instrumenting the integration suite takes it from ~45s to over 15 minutes, and
+        # several of those tests assert on elapsed time, so the instrumentation would
+        # risk changing what it measures. Most of this library's real coverage comes
+        # from those tests, so gating on a number that describes half the testing would
+        # be worse than not gating - it would fail honest changes and pass the kind of
+        # bug this library actually ships, which lived in an uncovered catch block.
+        if: always()
+        run: |
+          set -euo pipefail
+          dotnet tool install --global dotnet-reportgenerator-globaltool
+          reportgenerator \
+            -reports:'artifacts/test-results/**/coverage.cobertura.xml' \
+            -targetdir:artifacts/coverage \
+            -reporttypes:'MarkdownSummaryGithub;TextSummary'
+          {
+            echo '> Unit suite only. The integration suite is not instrumented, so real'
+            echo '> coverage is higher than this. See the note in ci.yml.'
+            echo
+            cat artifacts/coverage/SummaryGithub.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/coverage/Summary.txt
+
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: artifacts/test-results
@@ -80,7 +107,7 @@ jobs:
           --output artifacts/packages
 
       - name: Upload package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nuget-package
           path: artifacts/packages
@@ -95,10 +122,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: |
             8.0.x
@@ -126,7 +153,7 @@ jobs:
           fi
 
       - name: Download package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nuget-package
           path: artifacts/packages

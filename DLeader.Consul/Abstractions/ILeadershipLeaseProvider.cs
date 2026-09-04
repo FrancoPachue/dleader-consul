@@ -34,4 +34,48 @@ public interface ILeadershipLeaseProvider
     /// </para>
     /// </remarks>
     Task<ILeadershipLease?> TryAcquireLeadershipAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Waits until this instance wins leadership, and returns the lease.
+    /// </summary>
+    /// <param name="cancellationToken">
+    /// Abandons the attempt. Like <see cref="TryAcquireLeadershipAsync"/>, it is linked
+    /// to the resulting lease's <see cref="ILeadershipLease.LostToken"/>.
+    /// </param>
+    /// <returns>A held lease. This method does not return without one.</returns>
+    /// <exception cref="OperationCanceledException">
+    /// The token was cancelled before leadership was won.
+    /// </exception>
+    /// <remarks>
+    /// <para>
+    /// Equivalent to calling <see cref="TryAcquireLeadershipAsync"/> in a loop, which
+    /// is what every caller ended up writing. The Consul implementation waits on a
+    /// blocking query against the lock key rather than sleeping, so a follower takes
+    /// over as soon as the key is released instead of at the next poll.
+    /// </para>
+    /// <para>
+    /// Use <see cref="TryAcquireLeadershipAsync"/> instead when the instance has
+    /// follower work to do rather than idling.
+    /// </para>
+    /// <para>
+    /// The default implementation polls. It exists so that adding this method did not
+    /// break existing implementations of the interface, and any implementation that can
+    /// do better should override it.
+    /// </para>
+    /// </remarks>
+    async Task<ILeadershipLease> AcquireLeadershipAsync(CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var lease = await TryAcquireLeadershipAsync(cancellationToken).ConfigureAwait(false);
+            if (lease is not null)
+            {
+                return lease;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+        }
+    }
 }
