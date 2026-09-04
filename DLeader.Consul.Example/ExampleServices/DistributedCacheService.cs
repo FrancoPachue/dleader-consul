@@ -8,7 +8,8 @@ namespace DLeader.Consul.Example
 {
     public class DistributedCacheService : BackgroundService
     {
-        private readonly ILeaderElection _leaderElection;
+        private readonly ILeadershipLeaseProvider _leases;
+        private volatile ILeadershipLease? _currentLease;
         private readonly IMessageBroker _messageBroker;
         private readonly ILogger<DistributedCacheService> _logger;
         private readonly IConsulClient _consulClient;
@@ -21,13 +22,13 @@ namespace DLeader.Consul.Example
         private long _cacheMisses;
 
         public DistributedCacheService(
-            ILeaderElection leaderElection,
+            ILeadershipLeaseProvider leases,
             IMessageBroker messageBroker,
             ILogger<DistributedCacheService> logger,
             IConsulClient consulClient,
             IOptions<DistributedCacheOptions> options)
         {
-            _leaderElection = leaderElection;
+            _leases = leases;
             _messageBroker = messageBroker;
             _logger = logger;
             _consulClient = consulClient;
@@ -52,23 +53,45 @@ namespace DLeader.Consul.Example
         {
             try
             {
-                await _leaderElection.StartLeaderElectionAsync(stoppingToken);
                 _logger.LogInformation("Distributed cache service started. Node ID: {NodeId}", _nodeId);
 
                 await RequestCacheSync();
 
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    if (await _leaderElection.IsLeaderAsync())
+                    // The lease is held for as long as this node keeps leading, rather
+                    // than taken and released on every pass. Asking whether we are the
+                    // leader before each pass would leave a window in which two nodes
+                    // clean the same cache; holding the lease closes it.
+                    await using var lease = await _leases.TryAcquireLeadershipAsync(stoppingToken);
+                    _currentLease = lease;
+
+                    if (lease is null)
                     {
-                        if (DateTime.UtcNow - _lastCleanup >= _options.CleanupInterval)
-                        {
-                            await CheckAndCleanExpiredEntries();
-                            _lastCleanup = DateTime.UtcNow;
-                        }
-                        await ReportMetricsIfNeeded();
+                        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                        continue;
                     }
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+
+                    using var leading = CancellationTokenSource.CreateLinkedTokenSource(
+                        lease.LostToken, stoppingToken);
+
+                    try
+                    {
+                        while (!leading.IsCancellationRequested)
+                        {
+                            if (DateTime.UtcNow - _lastCleanup >= _options.CleanupInterval)
+                            {
+                                await CheckAndCleanExpiredEntries();
+                                _lastCleanup = DateTime.UtcNow;
+                            }
+                            await ReportMetricsIfNeeded();
+                            await Task.Delay(TimeSpan.FromSeconds(5), leading.Token);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Leadership moved on, or the host is stopping.
+                    }
                 }
             }
             catch (Exception ex)
@@ -91,7 +114,7 @@ namespace DLeader.Consul.Example
                         return new CacheResult<T>
                         {
                             Success = true,
-                            Value = (T)entry.Value,
+                            Value = (T)entry.Value!,
                             FromNode = entry.SourceNode
                         };
                     }
@@ -214,7 +237,7 @@ namespace DLeader.Consul.Example
                         JsonSerializer.Serialize(new CacheSyncResponse
                         {
                             SourceNode = _nodeId,
-                            TargetNode = request.RequestingNode,
+                            TargetNode = request?.RequestingNode ?? string.Empty,
                             Entries = snapshot,
                             Timestamp = DateTime.UtcNow
                         }));
@@ -266,7 +289,7 @@ namespace DLeader.Consul.Example
             {
                 var invalidation = JsonSerializer.Deserialize<CacheInvalidationMessage>(message);
 
-                if (invalidation?.SourceNode != _nodeId)
+                if (invalidation is not null && invalidation.SourceNode != _nodeId)
                 {
                     _cache.TryRemove(invalidation.Key, out _);
                     _logger.LogDebug(
@@ -286,7 +309,7 @@ namespace DLeader.Consul.Example
             {
                 var update = JsonSerializer.Deserialize<CacheUpdateMessage>(message);
 
-                if (update?.SourceNode != _nodeId)
+                if (update is not null && update.SourceNode != _nodeId)
                 {
                     var entry = new CacheEntry
                     {
@@ -379,54 +402,54 @@ namespace DLeader.Consul.Example
 
         private class CacheEntry
         {
-            public object Value { get; set; }
+            public object ?Value { get; set; }
             public DateTime ExpiresAt { get; set; }
             public DateTime LastAccessed { get; set; }
             public DateTime CreatedAt { get; set; }
-            public string SourceNode { get; set; }
+            public string SourceNode { get; set; } = string.Empty;
             public CachePriority Priority { get; set; }
         }
 
         private class CacheEntrySnapshot
         {
-            public object Value { get; set; }
+            public object ?Value { get; set; }
             public DateTime ExpiresAt { get; set; }
             public CachePriority Priority { get; set; }
         }
 
         private class CacheUpdateMessage
         {
-            public string Key { get; set; }
-            public object Value { get; set; }
+            public string Key { get; set; } = string.Empty;
+            public object ?Value { get; set; }
             public DateTime ExpiresAt { get; set; }
-            public string SourceNode { get; set; }
+            public string SourceNode { get; set; } = string.Empty;
             public CachePriority Priority { get; set; }
         }
 
         private class CacheInvalidationMessage
         {
-            public string Key { get; set; }
-            public string Reason { get; set; }
-            public string SourceNode { get; set; }
+            public string Key { get; set; } = string.Empty;
+            public string Reason { get; set; } = string.Empty;
+            public string SourceNode { get; set; } = string.Empty;
         }
 
         private class CacheSyncRequest
         {
-            public string RequestingNode { get; set; }
+            public string RequestingNode { get; set; } = string.Empty;
             public DateTime Timestamp { get; set; }
         }
 
         private class CacheSyncResponse
         {
-            public string SourceNode { get; set; }
-            public string TargetNode { get; set; }
-            public Dictionary<string, CacheEntrySnapshot> Entries { get; set; }
+            public string SourceNode { get; set; } = string.Empty;
+            public string TargetNode { get; set; } = string.Empty;
+            public Dictionary<string, CacheEntrySnapshot> Entries { get; set; } = new();
             public DateTime Timestamp { get; set; }
         }
 
         private class CacheMetrics
         {
-            public string NodeId { get; set; }
+            public string NodeId { get; set; } = string.Empty;
             public int TotalItems { get; set; }
             public long MemoryUsage { get; set; }
             public long CacheHits { get; set; }

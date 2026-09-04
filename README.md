@@ -1,171 +1,332 @@
 ﻿# DLeader.Consul
 
-A .NET library that provides distributed leader election capabilities using HashiCorp Consul. This library helps you implement leader election patterns in distributed systems with a clean and simple API.
+[![Build](https://github.com/FrancoPachue/dleader-consul/actions/workflows/ci.yml/badge.svg)](https://github.com/FrancoPachue/dleader-consul/actions/workflows/ci.yml)
+[![NuGet](https://img.shields.io/nuget/v/DLeader.Consul.svg)](https://www.nuget.org/packages/DLeader.Consul)
+[![NuGet downloads](https://img.shields.io/nuget/dt/DLeader.Consul.svg)](https://www.nuget.org/packages/DLeader.Consul)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Features
+Distributed leader election for .NET on HashiCorp Consul, built on Consul sessions and
+a KV lock.
 
-- 🔄 Automatic leader election using Consul
-- 🔌 Easy service registration and discovery
-- 🏃 Automatic session management and renewal
-- 🎯 Event-driven leadership changes
-- ⚡ High performance and low overhead
-- 🛠️ Built with dependency injection in mind
-- 📝 Extensive logging and diagnostics
+The library hands you a **lease**: a claim on leadership that stays valid for the
+duration of your work, tells you through a `CancellationToken` when it is gone, and
+carries a **fencing token** you pass to whatever resource you are protecting. That last
+part is the one that actually makes concurrent access safe, and the section on what this
+does *not* guarantee explains why.
 
-## Installation
+Targets `net8.0`, `net9.0` and `net10.0`.
 
 ```bash
 dotnet add package DLeader.Consul
 ```
 
-View package on [NuGet Gallery](https://www.nuget.org/packages/DLeader.Consul)
+---
 
-## Quick Start
+## Usage
 
 ```csharp
-// Register the service
-services.AddConsulLeaderElection(options =>
-{
-    options.ServiceName = "my-service";
-    options.Address = "http://consul:8500";
-});
-
-// Use in your service
-public class MyService : BackgroundService
-{
-    private readonly ILeaderElection _leaderElection;
-    private readonly ILogger<MyService> _logger;
-    
-    public MyService(ILeaderElection leaderElection, ILogger<MyService> logger)
+builder.Services.AddConsulLeaderElection(
+    consul =>
     {
-        _leaderElection = leaderElection;
-        _logger = logger;
-    }
+        consul.ServiceName = "invoice-worker";
+        consul.Address     = "http://consul:8500";
+        consul.SessionTTL  = 10;   // seconds; Consul's minimum
+    },
+    service => service.ServicePort = 8080);
+```
+
+```csharp
+public sealed class InvoiceWorker : BackgroundService
+{
+    private readonly ILeadershipLeaseProvider _leases;
+    private readonly IInvoiceStore _store;
+
+    public InvoiceWorker(ILeadershipLeaseProvider leases, IInvoiceStore store)
+        => (_leases, _store) = (leases, store);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await _leaderElection.StartLeaderElectionAsync(stoppingToken);
-
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (await _leaderElection.IsLeaderAsync())
+            await using var lease = await _leases.TryAcquireLeadershipAsync(stoppingToken);
+
+            if (lease is null)
             {
-                _logger.LogInformation("This instance is the leader");
-                // Do leader-specific work
+                // Someone else leads, or Consul's lock delay has not elapsed.
+                await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                continue;
             }
 
-            await Task.Delay(1000, stoppingToken);
+            // Work stops when leadership is lost as well as when the host shuts down.
+            using var work = CancellationTokenSource.CreateLinkedTokenSource(
+                lease.LostToken, stoppingToken);
+
+            try
+            {
+                while (!work.IsCancellationRequested)
+                {
+                    // The fencing token travels with the write. This is the part that
+                    // makes the exclusion safe - see "What this does not guarantee".
+                    await _store.CloseBatchAsync(lease.FencingToken, work.Token);
+                    await Task.Delay(TimeSpan.FromSeconds(5), work.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Leadership moved on, or the host is stopping.
+            }
         }
     }
 }
 ```
 
-## Configuration Options
+And the half that most people skip — the resource has to enforce it:
 
-### ConsulOptions
+```sql
+-- The write is rejected unless it carries a token at least as high as the
+-- highest one this row has already accepted.
+UPDATE invoice_batches
+   SET status = 'closed', fencing_token = @token
+ WHERE id = @id
+   AND fencing_token <= @token;
+```
 
 ```csharp
-public class ConsulOptions
+public async Task CloseBatchAsync(long fencingToken, CancellationToken ct)
 {
-    public string ServiceName { get; set; } = string.Empty;
-    public string Address { get; set; } = "http://localhost:8500";
-    public int SessionTTL { get; set; } = 10;
-    public int LeaderCheckInterval { get; set; } = 5;
-    public int RenewInterval { get; set; } = 5;
-    public int VerificationRetries { get; set; } = 3;
-    public int VerificationRetryDelay { get; set; } = 1;
+    var rows = await _db.ExecuteAsync(Sql, new { id = _batchId, token = fencingToken }, ct);
+
+    if (rows == 0)
+    {
+        // A later leader has already written here. This instance is stale, whatever
+        // its lease still believes.
+        throw new FencedOutException(fencingToken);
+    }
 }
 ```
 
-### ServiceRegistrationOptions
+---
+
+## Guarantees
+
+**The model.** Consul is a strongly consistent (CP) store. Leadership is a KV key held
+by a session; a session survives only while this process keeps renewing it. Every
+guarantee below is Consul's, inherited — this library adds no consensus of its own.
+
+While `lease.LostToken` has not been cancelled:
+
+1. **At most one lease per key.** Consul granted the lock to this session and to no
+   other. Two instances cannot both hold a live lease for the same `ServiceName` at the
+   same time.
+2. **The fencing token is unique and strictly increasing.** `FencingToken` is the
+   Consul `ModifyIndex` of the lock key at the moment of acquisition, derived from the
+   Raft log index. Every subsequent leader observes a strictly greater value, and no
+   value is ever reused.
+3. **Leadership loss is signalled, not polled.** `LostToken` is cancelled when the
+   session expires, when the lock key is observed in another session's hands, when the
+   local deadline passes without a successful renewal, or when the lease is disposed.
+
+### The assumptions these rest on
+
+| Assumption | If it does not hold |
+|---|---|
+| The Consul cluster keeps a quorum. | No leases are granted. Existing leases expire at their TTL. Availability is lost; safety is not. |
+| The Consul cluster is not restored from a snapshot or rebuilt. | Raft indices can move backwards, so a new leader's fencing token may be *lower* than an old one's. Guarantee 2 breaks. This is the one failure mode where fencing itself stops protecting you. |
+| Only this library writes to `service/{ServiceName}/leader`. | Anything else writing that key can move the lock or the index arbitrarily. |
+| The process is scheduled often enough to run its own watchdog. | Cancellation of `LostToken` is delayed by however long the process was frozen. See below. |
+
+**Clock skew does not affect this.** The local deadline is measured with
+`Environment.TickCount64`, a monotonic counter. NTP steps, virtual-machine clock drift
+and time-zone changes cannot move it. Consul's own TTL accounting is likewise not
+wall-clock dependent across nodes.
+
+**Garbage-collection pauses and hypervisor stalls do.** A pause longer than
+`SessionTTL` means Consul invalidates the session while the process is frozen. When it
+resumes, `LostToken` is cancelled almost immediately — but "almost immediately" starts
+when the process starts running again, which may be well after a successor took over.
+The lock delay below narrows this window; the fencing token is what closes it.
+
+**Network partitions.** A partitioned instance stops being able to renew. Its local
+watchdog cancels `LostToken` at `SessionTTL - LeaseSafetyMarginSeconds` measured
+locally, which is *before* Consul invalidates the session at `SessionTTL`, which is in
+turn before any successor may acquire. That last gap is Consul's lock delay, set by
+`LockDelaySeconds` (default 15). With the defaults:
+
+```
+t=0s    last successful renewal
+t=8s    local watchdog cancels LostToken     (TTL 10 - margin 2)
+t=10s   Consul invalidates the session and releases the key
+t=25s   the earliest a successor may acquire (+ lock delay 15)
+```
+
+That ordering is covered by an integration test against a real Consul. It holds as long
+as the old leader is running; it is not a guarantee that survives the process being
+frozen.
+
+---
+
+## What this does not guarantee
+
+**A distributed lock alone does not give you mutual exclusion.** This is not specific to
+Consul or to this library. The argument is Martin Kleppmann's, in
+[*How to do distributed locking*](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html)
+(2016), and it applies to every lock service, this one included:
+
+> A client holding a lock can be paused — by a GC pause, a page fault, a scheduler
+> preemption — for longer than the lock's lease. The lock expires, another client
+> acquires it, and then the first client wakes up and, still believing it holds the
+> lock, writes to the shared resource.
+
+No amount of checking closes that window, because the paused process cannot check
+anything while paused. The fix is not a better lock. The fix is that **the resource must
+reject stale writers**, and to do that it needs a monotonically increasing token from
+the lock — a *fencing token*.
+
+Concretely, this library does **not** guarantee that:
+
+- **Two instances never run leader work concurrently.** They can. During the pause
+  window above, the old leader's `LostToken` is uncancelled and its code is running.
+  What the library guarantees is that the old leader's writes carry a *lower*
+  `FencingToken` than the new leader's.
+- **`LostToken` fires before a successor acquires.** It fires before, in every case
+  where this process is scheduled. That covers network partitions and Consul failures.
+  It does not cover this process being frozen.
+- **Anything at all, if you ignore `FencingToken`.** If your side effects do not carry
+  the token and your resource does not compare it, you have an advisory lock and a
+  race, and the library's other guarantees will not save you.
+- **The fencing token orders anything beyond this one key.** It is the `ModifyIndex` of
+  one KV entry. It says nothing about other keys, other services, or wall-clock time.
+- **Durability from `IMessageBroker`.** That type is a convenience for coordination
+  chatter over the KV store. A subscriber receives what is published after
+  `SubscribeAsync` completes, in the order Consul accepted it, normally once each — but
+  a retry after a failed watch can redeliver, messages are swept after
+  `MessageBrokerOptions.Retention` (five minutes by default), and an instance that is
+  down when one is published never sees it. It is not a queue, and raising the
+  retention does not make it one.
+
+### If your resource cannot accept a fencing token
+
+Some cannot — a third-party API with no conditional write, a filesystem, a shell
+command. Your options, in descending order of safety:
+
+1. Put something that *can* fence in front of it: a database row, a compare-and-set in
+   Consul's own KV, an object-store conditional write.
+2. Make the operation idempotent, so a duplicate run is harmless.
+3. Accept the risk explicitly, size the pause window against `SessionTTL`, and write
+   down that you did.
+
+There is no fourth option where the lock alone makes it safe.
+
+---
+
+## When not to use this
+
+- **You need consensus over state, not just a leader.** Use a replicated log
+  (Raft directly, Kafka) or a database with the data in it. Leader election tells you
+  *who*, never *what*.
+- **You are already running Kubernetes.** A `Lease` object in `coordination.k8s.io`,
+  via the client-go leader election or a .NET equivalent, gives you the same thing
+  without another dependency. Its `Lease` also carries a version you can fence with.
+- **You already run etcd or ZooKeeper and not Consul.** Both do this well. Adding a
+  Consul cluster only for leader election is a lot of operational surface for one lock.
+- **The work is short and idempotent.** If running it twice is harmless, a lock is
+  ceremony. Make it idempotent and skip the coordination.
+- **You need sub-second failover.** Consul's minimum session TTL is 10 seconds and the
+  default lock delay adds 15 more. Worst-case failover here is tens of seconds, by
+  design. Something with a heartbeat in the tens of milliseconds is a different tool.
+- **You need mutual exclusion for correctness and cannot fence.** See the section
+  above. This library will not give you what you need, and neither will any other lock.
+
+---
+
+## Configuration
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ServiceName` | *(required)* | Scopes the lock key: `service/{ServiceName}/leader`. |
+| `Address` | `http://localhost:8500` | Consul agent HTTP address. |
+| `SessionTTL` | `10` | Session lifetime in seconds. Consul enforces a minimum of 10. |
+| `LockDelaySeconds` | `15` | Seconds Consul refuses the lock to anyone after an invalidation. The main safety/failover dial. `0` removes the guard. |
+| `LeaseSafetyMarginSeconds` | `2` | Subtracted from `SessionTTL` to get the local deadline at which a lease declares itself lost. Must be `> 0` and `< SessionTTL`. |
+| `LeaderCheckInterval` | `5` | Campaign API only: seconds between acquisition attempts. |
+| `RenewInterval` | `5` | Campaign API only: seconds between session renewals. |
+| `VerificationRetries` | `3` | Campaign API only: attempts to confirm service registration. |
+| `VerificationRetryDelay` | `1` | Campaign API only: seconds between those attempts. |
+
+Lowering `LockDelaySeconds` shortens failover and shortens the window in which a failed
+leader is expected to notice. Raising it does the opposite. There is no setting that
+gives you both.
+
+### `ServiceRegistrationOptions`
+
+Only used by the campaign API, which registers this instance as a Consul service.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `ServicePort` | `0` | Port registered in Consul and used to build the instance id. |
+| `ServiceAddress` | *(empty)* | Address Consul dials for the health check. Falls back to `HOSTNAME`, then the machine name. Set it when that is not the address the agent can reach — behind NAT, or in a container whose hostname the agent cannot resolve. |
+| `HealthCheckEndpoint` | `/health` | Path of the HTTP health check. |
+| `HealthCheckInterval` | `10` | Seconds between health checks. |
+| `HealthCheckTimeout` | `5` | Seconds before a health check times out. |
+| `DeregisterCriticalServiceAfter` | `60` | Seconds a failing service is kept before Consul removes it. |
+| `Tags` | `["leadership-service"]` | Tags applied to the registration. |
+| `DeregisterSiblingInstancesOnStart` | `false` | Deregister other instances of this service found on the local agent at startup. Off by default: with two instances sharing an agent, each would remove the other. Re-registering the same id already replaces a previous incarnation, so this is rarely needed. |
+
+### `MessageBrokerOptions`
+
+| Option | Default | Meaning |
+|---|---|---|
+| `Retention` | `5 min` | How long a published message survives before the sweep deletes it. |
+| `CleanupInterval` | `1 min` | How often expired messages are swept. |
+| `WatchTimeout` | `1 min` | Long-poll timeout for the watch. Not a delivery delay — Consul answers as soon as something changes; lowering it only adds idle requests. |
+
+Bind from `appsettings.json` the usual way:
 
 ```csharp
-public class ServiceRegistrationOptions
-{
-    public int ServicePort { get; set; }
-    public string HealthCheckEndpoint { get; set; } = "/health";
-    public TimeSpan HealthCheckInterval { get; set; } = TimeSpan.FromSeconds(10);
-    public TimeSpan HealthCheckTimeout { get; set; } = TimeSpan.FromSeconds(5);
-    public TimeSpan DeregisterAfter { get; set; } = TimeSpan.FromMinutes(1);
-}
+builder.Services.AddConsulLeaderElection(
+    consul => builder.Configuration.GetSection("Consul").Bind(consul),
+    service => service.ServicePort = 8080);
 ```
 
-## Advanced Usage
+---
 
-### Configuration in appsettings.json
+## The older API
 
-```json
-{
-  "Consul": {
-    "ServiceName": "your-service-name",
-    "Address": "http://localhost:8500",
-    "SessionTTL": 10,
-    "LeaderCheckInterval": 5,
-    "RenewInterval": 5,
-    "VerificationRetries": 3,
-    "VerificationRetryDelay": 1
-  },
-  "ServiceRegistration": {
-    "ServicePort": 5000,
-    "HealthCheckEndpoint": "/health",
-    "HealthCheckInterval": "00:00:10",
-    "HealthCheckTimeout": "00:00:05",
-    "DeregisterAfter": "00:01:00"
-  }
-}
-```
+`ILeaderElection` — `StartLeaderElectionAsync`, `OnLeadershipAcquired`,
+`OnLeadershipLost`, `GetCurrentLeaderAsync` — still ships and still works.
+`IsLeaderAsync()` is `[Obsolete]`: its signature is a check-then-act race, because a
+`bool` describing the past is stale before the caller can use it. Migrate to
+`TryAcquireLeadershipAsync`.
 
-## Prerequisites
+A single `ConsulLeaderElection` instance uses one API or the other, never both — they
+contend for the same key with separate sessions, and mixing them throws
+`InvalidOperationException`.
 
-- .NET 8.0
-- Consul server (local or remote)
+---
 
-## Running the Examples
-
-1. Start Consul:
-```bash
-docker-compose up -d
-```
-
-2. Run multiple instances:
-```bash
-dotnet run --project DLeader.Consul.Example
-```
-
-## Testing
+## Development
 
 ```bash
-dotnet test
+dotnet build                                                   # net8.0, net9.0, net10.0
+dotnet test DLeader.Consul.Tests                               # unit, all targets
+dotnet test DLeader.Consul.IntegrationTests                    # needs Docker
 ```
 
-## Contributing
+Integration tests start a real Consul in a container through Testcontainers, run on all
+three targets, and cover contested acquisition, fencing-token monotonicity, loss
+detection when the session is destroyed, loss detection when the agent becomes
+unreachable, message delivery and de-duplication, and what the campaign path actually
+registers. They are the only tests that can tell you whether the guarantees above hold —
+every bug fixed in 1.11.0 was invisible to the mocked suite — so changes to the lease or
+broker paths need to go through them.
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+Requires the .NET 10 SDK to build (it produces all three targets) and Docker to run the
+integration suite.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details
-
-## Support
-
-If you need help or have any questions:
-- Open an issue
-- Submit a pull request
-- Contact the maintainers
+MIT — see [LICENSE](LICENSE).
 
 ## Maintainers
 
-- Franco Pachue
-
-## Acknowledgments
-
-- HashiCorp Consul team
-- .NET community
-
-## Tags
-
-`consul`, `leader-election`, `distributed-systems`, `dotnet`, `csharp`, `microservices`, `service-discovery`
+Franco Pachue

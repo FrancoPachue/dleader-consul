@@ -173,19 +173,24 @@ namespace DLeader.Consul.Tests.Implementations
             var broker = CreateMessageBroker();
             var normalHandlerCalled = false;
 
+            // El broker arranca desde el indice actual y solo despacha claves con
+            // ModifyIndex mayor al ya despachado, asi que el mock tiene que avanzar el
+            // indice igual que lo haria Consul.
             _kvEndpointMock
                 .Setup(x => x.List(It.IsAny<string>(), It.IsAny<QueryOptions>(), It.IsAny<CancellationToken>()))
-                .ReturnsAsync(new QueryResult<KVPair[]>
-                {
-                    LastIndex = 1,
-                    Response = new[]
+                .ReturnsAsync((string key, QueryOptions options, CancellationToken token) =>
+                    new QueryResult<KVPair[]>
                     {
-                        new KVPair("test")
+                        LastIndex = options.WaitIndex + 1,
+                        Response = new[]
                         {
-                            Value = Encoding.UTF8.GetBytes("test-message-content")
+                            new KVPair("test")
+                            {
+                                ModifyIndex = options.WaitIndex + 1,
+                                Value = Encoding.UTF8.GetBytes("test-message-content")
+                            }
                         }
-                    }
-                });
+                    });
 
             // Act
             await broker.SubscribeAsync(messageType, async (_) =>
@@ -210,9 +215,12 @@ namespace DLeader.Consul.Tests.Implementations
                     It.IsAny<EventId>(),
                     It.IsAny<It.IsAnyType>(),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()
                 ),
-                Times.Once
+                // El test verifica aislamiento entre handlers, no cardinalidad. El mock
+                // responde al instante mientras Consul bloquearia, asi que el loop de
+                // watch da muchas vueltas en el tiempo de espera.
+                Times.AtLeastOnce
             );
         }
 
@@ -240,15 +248,17 @@ namespace DLeader.Consul.Tests.Implementations
                     It.IsAny<EventId>(),
                     It.IsAny<It.IsAnyType>(),
                     It.IsAny<Exception>(),
-                    It.IsAny<Func<It.IsAnyType, Exception, string>>()
+                    It.IsAny<Func<It.IsAnyType, Exception?, string>>()
                 ),
                 Times.AtLeastOnce
             );
         }
 
         [Fact]
-        public void Dispose_ShouldCancelBackgroundTasksAndDisposeResources()
+        public void Dispose_ShouldNotDisposeTheInjectedConsulClient()
         {
+            // El cliente se registra como singleton y lo comparten el broker y la
+            // eleccion de lider, asi que disponerlo aca romperia al otro consumidor.
             // Arrange
             var broker = CreateMessageBroker();
 
@@ -256,7 +266,7 @@ namespace DLeader.Consul.Tests.Implementations
             broker.Dispose();
 
             // Assert
-            _consulClientMock.Verify(x => x.Dispose(), Times.Once);
+            _consulClientMock.Verify(x => x.Dispose(), Times.Never);
         }
 
         private ConsulMessageBroker CreateMessageBroker()

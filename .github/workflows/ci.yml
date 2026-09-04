@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The token needs nothing but read access to check out the source. The publish job
+# widens nothing: it authenticates to NuGet with its own secret.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Source Link embeds commit information, which needs real history.
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # One SDK per target framework. The SDKs bring their runtimes, which the
+          # multi-targeted test run needs in order to execute on all three.
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        # Warnings are errors via Directory.Build.props, so this gate is real.
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Unit tests (net8.0, net9.0, net10.0)
+        run: >
+          dotnet test DLeader.Consul.Tests/DLeader.Consul.Tests.csproj
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=unit.trx"
+          --collect:"XPlat Code Coverage"
+          --results-directory artifacts/test-results
+
+      - name: Integration tests (real Consul via Testcontainers)
+        # These are the only tests that can tell us whether the leadership guarantees
+        # hold. Docker is available on the GitHub-hosted Ubuntu runners.
+        run: >
+          dotnet test DLeader.Consul.IntegrationTests/DLeader.Consul.IntegrationTests.csproj
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=integration.trx"
+          --results-directory artifacts/test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+          retention-days: 14
+
+      - name: Pack
+        run: >
+          dotnet pack DLeader.Consul/DLeader.Consul.csproj
+          --configuration Release
+          --no-build
+          --output artifacts/packages
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/packages
+          retention-days: 14
+
+  publish:
+    name: Publish to NuGet
+    # Nothing reaches NuGet that has not built clean on all three targets and passed
+    # both suites. The previous workflow published on a tag with no such gate.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Check the tag matches the project version
+        # A tag of v1.10 against a project version of 1.0.0 is how 1.10.0 ended up
+        # published as 1.10. Catch the mismatch here rather than on nuget.org.
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/v}"
+          project=$(grep -oPm1 '(?<=<Version>)[^<]+' DLeader.Consul/DLeader.Consul.csproj)
+          echo "tag=$tag project=$project"
+          if [ "$tag" != "$project" ]; then
+            echo "::error::Tag v$tag does not match <Version>$project</Version> in DLeader.Consul.csproj"
+            exit 1
+          fi
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts/packages
+
+      - name: Push to NuGet
+        # No --skip-duplicate: a version that is already published means the version was
+        # not bumped, and that should fail loudly rather than pass green having done
+        # nothing.
+        run: >
+          dotnet nuget push "artifacts/packages/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ secrets.NUGET_API_KEY }}

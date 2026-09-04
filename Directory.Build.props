@@ -1,0 +1,20 @@
+﻿<Project>
+
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+
+    <!-- A warning that nobody has to fix is a warning nobody reads. The sample app
+         opts out below; everything that ships or gates a release does not. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Byte-for-byte reproducible output, so a package can be checked against the
+         source it claims to come from. ContinuousIntegrationBuild additionally
+         normalises the paths embedded in the PDBs, and is set only on CI because it
+         breaks local debugging. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

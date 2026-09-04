@@ -6,7 +6,8 @@ namespace DLeader.Consul.Example.Services
 {
     public class QueueProcessorService : BackgroundService
     {
-        private readonly ILeaderElection _leaderElection;
+        private readonly ILeadershipLeaseProvider _leases;
+        private volatile ILeadershipLease? _currentLease;
         private readonly IMessageBroker _messageBroker;
         private readonly ILogger<QueueProcessorService> _logger;
         private readonly ConcurrentDictionary<string, HashSet<string>> _processingItems;
@@ -18,11 +19,11 @@ namespace DLeader.Consul.Example.Services
         private DateTime _lastItemGenerated = DateTime.MinValue;
 
         public QueueProcessorService(
-            ILeaderElection leaderElection,
+            ILeadershipLeaseProvider leases,
             IMessageBroker messageBroker,
             ILogger<QueueProcessorService> logger)
         {
-            _leaderElection = leaderElection;
+            _leases = leases;
             _messageBroker = messageBroker;
             _logger = logger;
             _processingItems = new ConcurrentDictionary<string, HashSet<string>>();
@@ -41,7 +42,6 @@ namespace DLeader.Consul.Example.Services
         {
             try
             {
-                await _leaderElection.StartLeaderElectionAsync(stoppingToken);
                 _logger.LogInformation("Queue processor service started. Node ID: {NodeId}", _nodeId);
 
                 // Iniciar el heartbeat
@@ -49,12 +49,33 @@ namespace DLeader.Consul.Example.Services
 
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    if (await _leaderElection.IsLeaderAsync())
+                    await using var lease = await _leases.TryAcquireLeadershipAsync(stoppingToken);
+                    _currentLease = lease;
+
+                    if (lease is null)
                     {
-                        await RemoveInactiveNodes();
-                        await AssignWorkToNodes(stoppingToken);
+                        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                        continue;
                     }
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+
+                    // Assignment stops the moment leadership does, so a node that has
+                    // been superseded cannot keep handing out work.
+                    using var leading = CancellationTokenSource.CreateLinkedTokenSource(
+                        lease.LostToken, stoppingToken);
+
+                    try
+                    {
+                        while (!leading.IsCancellationRequested)
+                        {
+                            await RemoveInactiveNodes();
+                            await AssignWorkToNodes(leading.Token);
+                            await Task.Delay(TimeSpan.FromSeconds(5), leading.Token);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Leadership moved on, or the host is stopping.
+                    }
                 }
             }
             catch (Exception ex)
@@ -248,7 +269,13 @@ namespace DLeader.Consul.Example.Services
                 var item = JsonSerializer.Deserialize<QueueItem>(message);
                 _logger.LogInformation("New item received: {ItemId}", item?.Id);
 
-                if (item != null && await _leaderElection.IsLeaderAsync())
+                // This handler runs off the message loop rather than inside the leader
+                // loop, so it borrows the lease that loop is holding. Checking the token
+                // narrows the window but does not close it - the assignment carries the
+                // fencing token so the receiving node can reject a stale assignment.
+                var lease = _currentLease;
+
+                if (item != null && lease is not null && !lease.LostToken.IsCancellationRequested)
                 {
                     var nodeId = await SelectLeastBusyNode();
                     await AssignItemToNode(item, nodeId);
@@ -283,8 +310,13 @@ namespace DLeader.Consul.Example.Services
         {
             try
             {
-                var failedItem = JsonSerializer.Deserialize<dynamic>(message);
-                _logger.LogWarning($"Item {failedItem.ItemId} failed on node {failedItem.NodeId}: {failedItem.Error}");
+                var failedItem = JsonSerializer.Deserialize<CompletedItem>(message);
+                if (failedItem is null)
+                {
+                    return;
+                }
+
+                _logger.LogWarning("Item {ItemId} failed on node {NodeId}", failedItem.ItemId, failedItem.NodeId);
             }
             catch (Exception ex)
             {
@@ -369,8 +401,8 @@ namespace DLeader.Consul.Example.Services
 
         private class QueueItem
         {
-            public string Id { get; set; }
-            public string Data { get; set; }
+            public string Id { get; set; } = string.Empty;
+            public string Data { get; set; } = string.Empty;
             public int Priority { get; set; }
             public DateTime CreatedAt { get; set; }
             public TimeSpan EstimatedProcessingTime => TimeSpan.FromSeconds(_random.Next(5, 15));
@@ -379,15 +411,15 @@ namespace DLeader.Consul.Example.Services
 
         private class CompletedItem
         {
-            public string ItemId { get; set; }
-            public string NodeId { get; set; }
+            public string ItemId { get; set; } = string.Empty;
+            public string NodeId { get; set; } = string.Empty;
             public TimeSpan ProcessingTime { get; set; }
-            public string Result { get; set; }
+            public string Result { get; set; } = string.Empty;
         }
 
         private class NodeHeartbeat
         {
-            public string NodeId { get; set; }
+            public string NodeId { get; set; } = string.Empty;
             public DateTime Timestamp { get; set; }
             public int ActiveItemsCount { get; set; }
         }

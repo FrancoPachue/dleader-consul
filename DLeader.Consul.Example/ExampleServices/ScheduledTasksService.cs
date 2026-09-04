@@ -6,7 +6,8 @@ namespace DLeader.Consul.Example
 {
     public class ScheduledTasksService : BackgroundService
     {
-        private readonly ILeaderElection _leaderElection;
+        private readonly ILeadershipLeaseProvider _leases;
+        private volatile ILeadershipLease? _currentLease;
         private readonly IMessageBroker _messageBroker;
         private readonly ILogger<ScheduledTasksService> _logger;
         private readonly IConsulClient _consulClient;
@@ -15,12 +16,12 @@ namespace DLeader.Consul.Example
         private bool _isInitialized = false;
 
         public ScheduledTasksService(
-            ILeaderElection leaderElection,
+            ILeadershipLeaseProvider leases,
             IMessageBroker messageBroker,
             ILogger<ScheduledTasksService> logger,
             IConsulClient consulClient)
         {
-            _leaderElection = leaderElection;
+            _leases = leases;
             _messageBroker = messageBroker;
             _logger = logger;
             _consulClient = consulClient;
@@ -73,17 +74,39 @@ namespace DLeader.Consul.Example
         {
             try
             {
-                await _leaderElection.StartLeaderElectionAsync(stoppingToken);
                 _logger.LogInformation("Scheduled tasks service started on node {NodeId}", _nodeId);
 
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    if (await _leaderElection.IsLeaderAsync())
+                    await using var lease = await _leases.TryAcquireLeadershipAsync(stoppingToken);
+                    _currentLease = lease;
+
+                    if (lease is null)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                        continue;
+                    }
+
+                    // Scheduled work runs under a token that dies with the lease, so a
+                    // task cannot keep running past the point where another node has
+                    // taken over the schedule.
+                    using var leading = CancellationTokenSource.CreateLinkedTokenSource(
+                        lease.LostToken, stoppingToken);
+
+                    try
                     {
                         await InitializeIfNeeded();
-                        await CheckAndExecuteScheduledTasks(stoppingToken);
+
+                        while (!leading.IsCancellationRequested)
+                        {
+                            await CheckAndExecuteScheduledTasks(leading.Token);
+                            await Task.Delay(TimeSpan.FromSeconds(30), leading.Token);
+                        }
                     }
-                    await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                    catch (OperationCanceledException)
+                    {
+                        // Leadership moved on, or the host is stopping.
+                    }
                 }
             }
             catch (Exception ex)
@@ -179,12 +202,12 @@ namespace DLeader.Consul.Example
 
                 if (DateTime.UtcNow - state.LastExecution >= task.Interval)
                 {
-                    await ExecuteTask(task, stoppingToken);
+                    await ExecuteScheduledTask(task, stoppingToken);
                 }
             }
         }
 
-        private async Task ExecuteTask(TaskDefinition task, CancellationToken stoppingToken)
+        private async Task ExecuteScheduledTask(TaskDefinition task, CancellationToken stoppingToken)
         {
             _logger.LogInformation("Executing scheduled task: {TaskName} - {Description}",
                 task.Name, task.Description);
@@ -259,6 +282,11 @@ namespace DLeader.Consul.Example
             try
             {
                 var result = JsonSerializer.Deserialize<TaskResult>(message);
+                if (result is null)
+                {
+                    return;
+                }
+
                 _logger.LogInformation(
                     "Received task result: {TaskName} - Status: {Status}",
                     result.TaskName, result.Status);
@@ -341,10 +369,10 @@ namespace DLeader.Consul.Example
 
         private class TaskDefinition
         {
-            public string Name { get; set; }
+            public string Name { get; set; } = string.Empty;
             public TimeSpan Interval { get; set; }
-            public string Description { get; set; }
-            public Func<CancellationToken, Task> TaskAction { get; set; }
+            public string Description { get; set; } = string.Empty;
+            public Func<CancellationToken, Task> TaskAction { get; set; } = _ => Task.CompletedTask;
             public TaskPriority Priority { get; set; }
         }
 
@@ -360,7 +388,7 @@ namespace DLeader.Consul.Example
 
         private class TaskResult
         {
-            public string TaskName { get; set; }
+            public string TaskName { get; set; } = string.Empty;
             public TaskStatus Status { get; set; }
             public DateTime Timestamp { get; set; }
         }
