@@ -41,6 +41,13 @@ Closes the gaps opened as issues alongside 1.11.0.
 
 ### Changed
 
+- **Publishing uses NuGet trusted publishing instead of a stored API key** ([#7]).
+  nuget.org validates the release job's OIDC token against a policy naming this
+  repository and workflow file, and returns a key valid for one hour. The 1.11.0
+  release failed with `403 (The specified API key is invalid, has expired, or does not
+  have permission...)` because the stored key had silently expired after roughly
+  nineteen months — which is exactly the failure this removes. There is no longer a key
+  to rotate, leak, or forget, and nothing left for an environment to protect.
 - GitHub Actions bumped to current majors, clearing the Node 20 deprecation warnings.
 - Integration tests cover the new surface against a real Consul, including an
   ACL-enabled agent with `default_policy = "deny"` — testing an ACL token against an
@@ -204,3 +211,4 @@ fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 [#3]: https://github.com/FrancoPachue/dleader-consul/issues/3
 [#5]: https://github.com/FrancoPachue/dleader-consul/issues/5
 [#6]: https://github.com/FrancoPachue/dleader-consul/issues/6
+[#7]: https://github.com/FrancoPachue/dleader-consul/issues/7
