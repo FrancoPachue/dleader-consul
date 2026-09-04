@@ -1,11 +1,9 @@
 ﻿using Consul;
-using DLeader.Consul.Abstractions;
-using DLeader.Consul.Configuration;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
 using System.Text;
 
-namespace DLeader.Consul.Implementations;
+namespace DLeader.Consul.Messaging;
 
 /// <summary>
 /// <see cref="IMessageBroker"/> over the Consul KV store: messages are written as
@@ -16,9 +14,6 @@ namespace DLeader.Consul.Implementations;
 /// Delivery is at least once and retention is a few minutes, so this suits coordination
 /// notifications and not durable work. See the interface for the full caveats.
 /// </remarks>
-// Implementing a type this package deprecates, on purpose: the interface still ships
-// and still works until 2.0 moves it out.
-#pragma warning disable CS0618
 public class ConsulMessageBroker : IMessageBroker, IDisposable, IAsyncDisposable
 {
     private readonly IConsulClient _consulClient;
@@ -373,4 +368,3 @@ public class ConsulMessageBroker : IMessageBroker, IDisposable, IAsyncDisposable
         GC.SuppressFinalize(this);
     }
 }
-#pragma warning restore CS0618

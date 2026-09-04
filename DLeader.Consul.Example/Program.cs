@@ -1,3 +1,4 @@
+using DLeader.Consul.Messaging;
 using DLeader.Consul.Example;
 using DLeader.Consul.Example.Services;
 using DLeader.Consul.Extensions;
@@ -11,19 +12,20 @@ var consulAddress = builder.Environment.IsDevelopment()
     ? "http://localhost:8500"  
     : "http://consul:8500";  
 
-builder.Services.AddConsulLeadership(options =>
+// Leadership and messaging are separate packages in 2.0. Both register the Consul
+// client with TryAddSingleton, so calling them together shares one connection.
+builder.Services.AddConsulLeaderElection(options =>
 {
     options.ServiceName = builder.Configuration["ConsulConfig:ServiceName"] ?? "dleader-consul-example";
     options.Address = builder.Configuration["ConsulConfig:Address"] ?? consulAddress;
     options.SessionTTL = builder.Configuration.GetValue<int>("ConsulConfig:SessionTTL", 10);
-    options.RenewInterval = builder.Configuration.GetValue<int>("ConsulConfig:RetryInterval", 5);
-    options.LeaderCheckInterval = builder.Configuration.GetValue<int>("ConsulConfig:LeaderCheckInterval", 5);
-    options.VerificationRetries = builder.Configuration.GetValue<int>("ConsulConfig:VerificationRetries", 3);
-    options.VerificationRetryDelay = builder.Configuration.GetValue<int>("ConsulConfig:VerificationRetryDelay", 1);
-}, serviceOptions =>
-{
-    serviceOptions.ServicePort = 8080;
+    options.LockDelaySeconds = builder.Configuration.GetValue<int>("ConsulConfig:LockDelaySeconds", 15);
+    options.LeaseSafetyMarginSeconds =
+        builder.Configuration.GetValue<int>("ConsulConfig:LeaseSafetyMarginSeconds", 2);
+    options.AclToken = builder.Configuration["ConsulConfig:AclToken"] ?? string.Empty;
 });
+
+builder.Services.AddConsulMessaging();
 
 //builder.Services.AddDistributedCache(options =>
 //{

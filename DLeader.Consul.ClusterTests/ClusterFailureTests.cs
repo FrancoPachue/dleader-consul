@@ -1,7 +1,7 @@
 using DLeader.Consul.Abstractions;
 using DLeader.Consul.Exceptions;
 
-namespace DLeader.Consul.IntegrationTests;
+namespace DLeader.Consul.ClusterTests;
 
 /// <summary>
 /// The library against a real three-server Consul cluster, losing quorum and losing its
@@ -19,11 +19,6 @@ namespace DLeader.Consul.IntegrationTests;
 /// out an election takes real time, and neither can be faked.
 /// </para>
 /// </remarks>
-// Each test in this class brings up its own three-server cluster, so letting them run
-// in parallel would mean a dozen Consul containers at once and elections competing for
-// the same CPU. One collection makes them sequential.
-[Collection("cluster")]
-[Trait("Category", "Cluster")]
 public class ClusterFailureTests : IAsyncLifetime
 {
     private readonly ConsulCluster _cluster = new();
@@ -112,8 +107,11 @@ public class ClusterFailureTests : IAsyncLifetime
         // Point the library at a server that is not the Raft leader, so stopping the
         // leader exercises Consul's internal failover rather than just killing our own
         // connection.
-        var raftLeader = await _cluster.GetLeaderIndexAsync();
-        Assert.InRange(raftLeader, 0, 2);
+        //
+        // Waiting rather than reading once: the leader is not resolvable during an
+        // election or before the catalog catches up, and a single reading makes this
+        // pass on an idle machine and fail on a loaded one.
+        var raftLeader = await _cluster.WaitForLeaderIndexAsync(TimeSpan.FromSeconds(90));
 
         var survivor = Enumerable.Range(0, 3).First(i => i != raftLeader);
 

@@ -178,11 +178,78 @@ The instrument to alert on is `dleader.consul.leadership.lost` and its `reason` 
 
 ---
 
-## Looking ahead to 2.0
+## From 1.13 to 2.0
 
-`ILeaderElection` — the whole interface, not just `IsLeaderAsync` — is going away in
-2.0, along with the Consul service registration that only it used. `IMessageBroker` is
-moving to a separate `DLeader.Consul.Messaging` package.
+If you followed the steps above, this is a version bump. If you did not, they are the
+work — the deprecated API is now gone rather than warning.
 
-Migrating to the lease API now means 2.0 is a version bump rather than a rewrite. Follow
-the steps above and you are already done.
+### What was removed
+
+| Removed | Replacement |
+|---|---|
+| `ILeaderElection` (the whole interface) | `ILeadershipLeaseProvider` |
+| `IsLeaderAsync()` | Hold a lease; observe `LostToken` |
+| `StartLeaderElectionAsync` | Nothing. Acquisition is the whole protocol. |
+| `OnLeadershipAcquired` / `OnLeadershipLost` | `LeaderElectedService`, or the loop above |
+| `ConsulLeaderElection.GetCurrentLeaderAsync` | Still there, still advisory only |
+| Consul service registration, health checks, `ServiceRegistrationOptions` | Register the service yourself if you want it registered |
+| `ConsulOptions.LeaderCheckInterval`, `RenewInterval`, `VerificationRetries`, `VerificationRetryDelay` | Nothing; they were campaign-only |
+| `AddConsulLeadership` | `AddConsulLeaderElection` + `AddConsulMessaging` |
+| `IMessageBroker` | The `DLeader.Consul.Messaging` package |
+
+### Service registration is no longer done for you
+
+The library used to register this instance as a Consul service with an HTTP health check,
+because the campaign API needed it. The lease API does not, so it does not.
+
+If you relied on those registrations for discovery, register them yourself — that is a
+concern of your application, and one line of `IConsulClient.Agent.ServiceRegister`.
+Nothing about leadership changes either way.
+
+### If you used the events
+
+```diff
+- _leaderElection.OnLeadershipAcquired += StartWork;
+- _leaderElection.OnLeadershipLost += StopWork;
+- await _leaderElection.StartLeaderElectionAsync(stoppingToken);
+```
+
+```csharp
+public sealed class Worker : LeaderElectedService
+{
+    public Worker(ILeadershipLeaseProvider leases, ILogger<Worker> logger)
+        : base(leases, logger) { }
+
+    protected override async Task ExecuteAsLeaderAsync(ILeadershipLease lease, CancellationToken ct)
+    {
+        // Runs once per leadership term. ct cancels when the term ends.
+        while (!ct.IsCancellationRequested)
+        {
+            await DoWorkAsync(lease.FencingToken, ct);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+}
+```
+
+This is better than the events were, in the way that matters: `ExecuteAsLeaderAsync`
+receives the lease, so it can pass `FencingToken` downstream. The events handed the
+handler nothing to fence with.
+
+### If you used the message broker
+
+```bash
+dotnet add package DLeader.Consul.Messaging
+```
+
+```diff
+- using DLeader.Consul.Abstractions;
++ using DLeader.Consul.Messaging;
+
+- builder.Services.AddConsulLeadership(configureConsul, configureService);
++ builder.Services.AddConsulLeaderElection(configureConsul);
++ builder.Services.AddConsulMessaging();
+```
+
+The type and its behaviour are unchanged. Both packages register the Consul client with
+`TryAddSingleton`, so using both still means one connection.

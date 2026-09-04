@@ -1,4 +1,4 @@
-namespace DLeader.Consul.Abstractions;
+namespace DLeader.Consul.Messaging;
 
 /// <summary>
 /// Fan-out of short-lived notifications between the instances of a service, carried
@@ -11,12 +11,6 @@ namespace DLeader.Consul.Abstractions;
 /// is published will never see it. Anything that must not be lost belongs in a real
 /// broker.
 /// </remarks>
-[Obsolete(
-    "IMessageBroker is moving to a separate DLeader.Consul.Messaging package in 2.0. " +
-    "It has nothing to do with leader election, and shipping a non-durable KV-backed " +
-    "fan-out inside a package that promises leadership guarantees invites it to be " +
-    "mistaken for a queue. Nothing changes for now; install the messaging package when " +
-    "2.0 ships, or move to a real broker if you need delivery guarantees.")]
 public interface IMessageBroker
 {
     /// <summary>

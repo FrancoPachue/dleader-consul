@@ -20,19 +20,21 @@ Targets `net8.0`, `net9.0` and `net10.0`.
 dotnet add package DLeader.Consul
 ```
 
+Message fan-out between instances lives in a separate package,
+[`DLeader.Consul.Messaging`](https://www.nuget.org/packages/DLeader.Consul.Messaging).
+It has nothing to do with leader election, and it is not a queue.
+
 ---
 
 ## Usage
 
 ```csharp
-builder.Services.AddConsulLeaderElection(
-    consul =>
-    {
-        consul.ServiceName = "invoice-worker";
-        consul.Address     = "http://consul:8500";
-        consul.SessionTTL  = 10;   // seconds; Consul's minimum
-    },
-    service => service.ServicePort = 8080);
+builder.Services.AddConsulLeaderElection(consul =>
+{
+    consul.ServiceName = "invoice-worker";
+    consul.Address     = "http://consul:8500";
+    consul.SessionTTL  = 10;   // seconds; Consul's minimum
+});
 ```
 
 ```csharp
@@ -192,13 +194,9 @@ Concretely, this library does **not** guarantee that:
   race, and the library's other guarantees will not save you.
 - **The fencing token orders anything beyond this one key.** It is the `ModifyIndex` of
   one KV entry. It says nothing about other keys, other services, or wall-clock time.
-- **Durability from `IMessageBroker`.** That type is a convenience for coordination
-  chatter over the KV store. A subscriber receives what is published after
-  `SubscribeAsync` completes, in the order Consul accepted it, normally once each — but
-  a retry after a failed watch can redeliver, messages are swept after
-  `MessageBrokerOptions.Retention` (five minutes by default), and an instance that is
-  down when one is published never sees it. It is not a queue, and raising the
-  retention does not make it one.
+- **Anything about `DLeader.Consul.Messaging`.** That is a separate package with much
+  weaker promises and its own README. Nothing on this page applies to it, which is most
+  of why it was split out.
 
 ### If your resource cannot accept a fencing token
 
@@ -246,37 +244,10 @@ There is no fourth option where the lock alone makes it safe.
 | `SessionTTL` | `10` | Session lifetime in seconds. Consul enforces a minimum of 10. |
 | `LockDelaySeconds` | `15` | Seconds Consul refuses the lock to anyone after an invalidation. The main safety/failover dial. `0` removes the guard. |
 | `LeaseSafetyMarginSeconds` | `2` | Subtracted from `SessionTTL` to get the local deadline at which a lease declares itself lost. Must be `> 0` and `< SessionTTL`. |
-| `LeaderCheckInterval` | `5` | Campaign API only: seconds between acquisition attempts. |
-| `RenewInterval` | `5` | Campaign API only: seconds between session renewals. |
-| `VerificationRetries` | `3` | Campaign API only: attempts to confirm service registration. |
-| `VerificationRetryDelay` | `1` | Campaign API only: seconds between those attempts. |
 
 Lowering `LockDelaySeconds` shortens failover and shortens the window in which a failed
 leader is expected to notice. Raising it does the opposite. There is no setting that
 gives you both.
-
-### `ServiceRegistrationOptions`
-
-Only used by the campaign API, which registers this instance as a Consul service.
-
-| Option | Default | Meaning |
-|---|---|---|
-| `ServicePort` | `0` | Port registered in Consul and used to build the instance id. |
-| `ServiceAddress` | *(empty)* | Address Consul dials for the health check. Falls back to `HOSTNAME`, then the machine name. Set it when that is not the address the agent can reach — behind NAT, or in a container whose hostname the agent cannot resolve. |
-| `HealthCheckEndpoint` | `/health` | Path of the HTTP health check. |
-| `HealthCheckInterval` | `10` | Seconds between health checks. |
-| `HealthCheckTimeout` | `5` | Seconds before a health check times out. |
-| `DeregisterCriticalServiceAfter` | `60` | Seconds a failing service is kept before Consul removes it. |
-| `Tags` | `["leadership-service"]` | Tags applied to the registration. |
-| `DeregisterSiblingInstancesOnStart` | `false` | Deregister other instances of this service found on the local agent at startup. Off by default: with two instances sharing an agent, each would remove the other. Re-registering the same id already replaces a previous incarnation, so this is rarely needed. |
-
-### `MessageBrokerOptions`
-
-| Option | Default | Meaning |
-|---|---|---|
-| `Retention` | `5 min` | How long a published message survives before the sweep deletes it. |
-| `CleanupInterval` | `1 min` | How often expired messages are swept. |
-| `WatchTimeout` | `1 min` | Long-poll timeout for the watch. Not a delivery delay — Consul answers as soon as something changes; lowering it only adds idle requests. |
 
 ### Running against a cluster with ACLs enabled
 
@@ -297,8 +268,7 @@ Bind from `appsettings.json` the usual way:
 
 ```csharp
 builder.Services.AddConsulLeaderElection(
-    consul => builder.Configuration.GetSection("Consul").Bind(consul),
-    service => service.ServicePort = 8080);
+    consul => builder.Configuration.GetSection("Consul").Bind(consul));
 ```
 
 ---
@@ -332,35 +302,61 @@ The `reason` tag is why this exists:
 `ILeadershipLease.LostReason` exposes the same value in code, for callers that want to
 react differently to a partition than to an orderly hand-off.
 
-## The older API
+## Less boilerplate
 
-`ILeaderElection` — `StartLeaderElectionAsync`, `OnLeadershipAcquired`,
-`OnLeadershipLost`, `GetCurrentLeaderAsync` — still ships and still works.
-`IsLeaderAsync()` is `[Obsolete]`: its signature is a check-then-act race, because a
-`bool` describing the past is stale before the caller can use it. Migrate to
-`TryAcquireLeadershipAsync`.
+`LeaderElectedService` is the loop above as a base class, for the common case of a
+background service whose work should run on one instance:
 
-A single `ConsulLeaderElection` instance uses one API or the other, never both — they
-contend for the same key with separate sessions, and mixing them throws
-`InvalidOperationException`.
+```csharp
+public sealed class InvoiceCloser : LeaderElectedService
+{
+    private readonly IInvoiceStore _store;
 
-**`ILeaderElection` is removed entirely in 2.0**, along with the Consul service
-registration that only it used, and `IMessageBroker` moves to a separate
-`DLeader.Consul.Messaging` package. [MIGRATION.md](MIGRATION.md) walks through moving to
-the lease API; doing it now makes 2.0 a version bump rather than a rewrite.
+    public InvoiceCloser(ILeadershipLeaseProvider leases, ILogger<InvoiceCloser> logger, IInvoiceStore store)
+        : base(leases, logger) => _store = store;
+
+    protected override async Task ExecuteAsLeaderAsync(ILeadershipLease lease, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await _store.CloseBatchAsync(lease.FencingToken, ct);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+}
+```
+
+`ExecuteAsLeaderAsync` is called once per leadership term, with a token cancelled the
+moment the term ends. It is a convenience with no path to Consul of its own — the
+guarantees are the ones documented above, not a second set.
+
+## Upgrading from 1.x
+
+**2.0 removed `ILeaderElection` entirely**, along with the Consul service registration
+that only it used, and moved `IMessageBroker` to
+[`DLeader.Consul.Messaging`](https://www.nuget.org/packages/DLeader.Consul.Messaging).
+
+Two APIs contending for the same lock key with different guarantees was the problem, not
+the solution. `IsLeaderAsync` was deprecated in 1.11 and warned about for two releases
+before it went.
+
+[MIGRATION.md](MIGRATION.md) walks through the change. If you already moved to the lease
+API on 1.11–1.13, 2.0 is a version bump.
 
 ---
 
 ## Development
 
 ```bash
-dotnet build                                                    # net8.0, net9.0, net10.0
-dotnet test DLeader.Consul.Tests                                # unit, all targets
-dotnet test DLeader.Consul.IntegrationTests \
-  --filter "Category!=Cluster"                                  # needs Docker
-dotnet test DLeader.Consul.IntegrationTests \
-  --filter "Category=Cluster" -f net8.0                         # 3-server cluster, slow
+dotnet build                                # net8.0, net9.0, net10.0
+dotnet test DLeader.Consul.Tests            # unit, all targets
+dotnet test DLeader.Consul.IntegrationTests # single Consul agent; needs Docker
+dotnet test DLeader.Consul.ClusterTests     # three-server Consul; slow
 ```
+
+Run the two suites separately. They are separate projects because sharing a run means a
+dozen containers competing while Raft elections time out, which produced failures that
+vanished when either suite ran alone.
 
 Integration tests start real Consul containers through Testcontainers. They are the only
 tests that can tell you whether the guarantees above hold — every bug fixed in 1.11.0 was

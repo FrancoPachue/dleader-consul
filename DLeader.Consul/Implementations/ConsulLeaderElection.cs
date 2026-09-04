@@ -11,116 +11,75 @@ using Microsoft.Extensions.Options;
 namespace DLeader.Consul.Implementations;
 
 /// <summary>
-/// Distributed leader election implementation using Consul.
+/// Distributed leader election using Consul sessions and a KV lock.
 /// </summary>
 /// <remarks>
-/// Exposes two mutually exclusive modes over the same lock key. The lease API of
-/// <see cref="ILeadershipLeaseProvider"/> is the safe one and is what new code should
-/// use. The campaign API of <see cref="ILeaderElection"/> is kept for compatibility;
-/// its <c>IsLeaderAsync</c> is obsolete because it cannot be used without a
-/// check-then-act race.
+/// <para>
+/// Leadership is expressed as a lease: a claim that stays valid for the duration of the
+/// caller's work, carries a fencing token to pass to the resource being protected, and
+/// signals its own loss through a cancellation token. See
+/// <see cref="ILeadershipLease"/> for what that does and does not guarantee.
+/// </para>
+/// <para>
+/// Before 2.0 this type also carried a second, event-driven API over the same lock key,
+/// with different guarantees and a mode guard to stop the two competing with each other.
+/// That path is gone: one way of doing this means one set of guarantees to state and
+/// keep. <c>LeaderElectedService</c> covers the ergonomics the events provided, built on
+/// this type rather than beside it.
+/// </para>
 /// </remarks>
-public class ConsulLeaderElection :
-    ILeaderElection,
-    ILeadershipLeaseProvider,
-    IDisposable,
-    IAsyncDisposable
+public class ConsulLeaderElection : ILeadershipLeaseProvider, IDisposable, IAsyncDisposable
 {
     private readonly ILogger<ConsulLeaderElection> _logger;
     private readonly ConsulOptions _options;
-    private readonly ServiceRegistrationOptions _serviceOptions;
     private readonly IConsulClient _consulClient;
+    private readonly bool _ownsClient;
     private readonly string _instanceId;
     private readonly string _lockKey;
-    private readonly CancellationTokenSource _cts;
     private bool _disposed;
 
     /// <summary>
-    /// Written by the election loop and read from disposal on another thread, so it
-    /// needs the volatile read/write barriers.
-    /// </summary>
-    private volatile bool _isLeader;
-
-    // Background tasks tracking
-    private Task? _electionTask;
-    private Task? _sessionRenewalTask;
-
-    /// <summary>
-    /// Stops the background loops. Linked to the caller's token so that disposal can
-    /// stop them even when the caller's token is never cancelled.
-    /// </summary>
-    private CancellationTokenSource? _electionCts;
-
-    /// <summary>0 = untouched, 1 = campaign API in use, 2 = lease API in use.</summary>
-    private int _mode;
-
-    /// <summary>
-    /// The session the campaign loop currently holds the lock with. Needed so that
-    /// disposal can release the lock against that specific session instead of deleting
-    /// the key outright.
-    /// </summary>
-    private volatile string? _currentCampaignSessionId;
-
-    private const int ModeCampaign = 1;
-    private const int ModeLease = 2;
-
-    /// <summary>
-    /// The maximum time the synchronous <see cref="Dispose"/> will block waiting for
-    /// the asynchronous cleanup.
-    /// </summary>
-    private static readonly TimeSpan SyncDisposeTimeout = TimeSpan.FromSeconds(10);
-
-    /// <summary>
-    /// Event triggered when this instance becomes the leader
-    /// </summary>
-    public event Func<Task>? OnLeadershipAcquired;
-
-    /// <summary>
-    /// Event triggered when this instance loses leadership
-    /// </summary>
-    public event Func<Task>? OnLeadershipLost;
-
-    /// <summary>
-    /// Gets the unique identifier for this instance
+    /// Identifies this instance in the lock key's value and in Consul session names.
+    /// Purely for diagnostics — nothing depends on it for correctness.
     /// </summary>
     public string InstanceId => _instanceId;
 
-    /// <summary>
-    /// Constructor for ConsulLeaderElection
-    /// </summary>
-    /// <param name="logger">Logger for diagnostics</param>
-    /// <param name="options">Consul configuration options</param>
-    /// <param name="serviceOptions">Service registration options</param>
-    /// <param name="consulClient">Optional Consul client</param>
-    /// <exception cref="ArgumentNullException">If any required parameter is null</exception>
+    /// <param name="logger">Logger for diagnostics.</param>
+    /// <param name="options">Consul configuration.</param>
+    /// <param name="consulClient">
+    /// Consul client. When omitted, one is built from <paramref name="options"/> and
+    /// disposed with this instance; when supplied, it is left alone, since it is
+    /// normally a shared singleton.
+    /// </param>
     public ConsulLeaderElection(
         ILogger<ConsulLeaderElection> logger,
         IOptions<ConsulOptions> options,
-        IOptions<ServiceRegistrationOptions> serviceOptions,
         IConsulClient? consulClient = null)
     {
         _logger = logger;
         _options = options.Value;
-        _serviceOptions = serviceOptions.Value;
 
         var hostname = Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
-        _instanceId = $"{_options.ServiceName}-{hostname}-{_serviceOptions.ServicePort}";
-        _lockKey = $"service/{_options.ServiceName}/leader";
-        _cts = new CancellationTokenSource();
 
+        // The trailing suffix is not decoration. This value names the Consul sessions
+        // this instance creates, so two instances sharing an id would be
+        // indistinguishable in Consul's session list — and two instances in one process
+        // is exactly what the tests construct. Host and process id stay in front so the
+        // value is still readable in a log.
+        _instanceId =
+            $"{_options.ServiceName}-{hostname}-{Environment.ProcessId}-{Guid.NewGuid().ToString("N")[..8]}";
+
+        _lockKey = $"service/{_options.ServiceName}/leader";
+
+        _ownsClient = consulClient is null;
         _consulClient = consulClient ?? ConsulClientFactory.Create(_options);
     }
-
-    // ---------------------------------------------------------------------------
-    // Lease API - the race-free path
-    // ---------------------------------------------------------------------------
 
     /// <inheritdoc />
     public async Task<ILeadershipLease?> TryAcquireLeadershipAsync(
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        EnterMode(ModeLease);
 
         var ttl = TimeSpan.FromSeconds(_options.SessionTTL);
         var safetyMargin = TimeSpan.FromSeconds(_options.LeaseSafetyMarginSeconds);
@@ -268,6 +227,45 @@ public class ConsulLeaderElection :
     }
 
     /// <summary>
+    /// Reports which instance currently holds the lock, for diagnostics.
+    /// </summary>
+    /// <returns>
+    /// The holder's instance id, or an empty string when nobody holds it.
+    /// </returns>
+    /// <remarks>
+    /// Advisory only, and stale the moment it returns. Never branch on it — that is the
+    /// check-then-act race the lease API exists to remove. Acquire a lease instead.
+    /// </remarks>
+    public async Task<string> GetCurrentLeaderAsync()
+    {
+        ThrowIfDisposed();
+        try
+        {
+            var pair = await _consulClient.KV.Get(_lockKey, CancellationToken.None);
+            if (pair.Response is null)
+                return string.Empty;
+
+            // A key with no session attached is a leftover from a leader that failed or
+            // released, not a leader. Lease sessions use Release behaviour, so the old
+            // value stays in place and reporting it without this check would name an
+            // instance that is no longer leading.
+            if (string.IsNullOrEmpty(pair.Response.Session))
+                return string.Empty;
+
+            // Consul represents an empty value as a null byte array.
+            if (pair.Response.Value is null)
+                return string.Empty;
+
+            return Encoding.UTF8.GetString(pair.Response.Value);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting current leader");
+            throw new ConsulException("Failed to get current leader", ex);
+        }
+    }
+
+    /// <summary>
     /// Blocks until the lock key changes, or until the lock delay could plausibly have
     /// elapsed, whichever comes first.
     /// </summary>
@@ -348,610 +346,41 @@ public class ConsulLeaderElection :
         }
     }
 
-    /// <summary>
-    /// Claims one of the two mutually exclusive modes.
-    /// </summary>
-    /// <remarks>
-    /// Both modes contend for the same lock key with different sessions, so an
-    /// instance running both would compete with itself and could hand leadership back
-    /// and forth between its own two sessions. Failing loudly is better than
-    /// debugging that.
-    /// </remarks>
-    private void EnterMode(int mode)
-    {
-        var previous = Interlocked.CompareExchange(ref _mode, mode, 0);
-        if (previous != 0 && previous != mode)
-        {
-            throw new InvalidOperationException(
-                "A single ConsulLeaderElection instance cannot use both the campaign API " +
-                "(StartLeaderElectionAsync) and the lease API (TryAcquireLeadershipAsync): " +
-                "they contend for the same lock key with separate sessions. Pick one, or " +
-                "register a separate instance per mode.");
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // Campaign API - kept for compatibility
-    // ---------------------------------------------------------------------------
-
-    /// <summary>
-    /// Starts the leader election campaign
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token to stop the election process</param>
-    /// <exception cref="LeadershipException">Thrown when the election process fails to start</exception>
-    public async Task StartLeaderElectionAsync(CancellationToken cancellationToken)
-    {
-        EnterMode(ModeCampaign);
-
-        try
-        {
-            // Linking to _cts means disposal stops the loops even when the caller's
-            // token is never cancelled. Without it, disposal would wait forever on
-            // loops nothing had told to stop.
-            _electionCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token, cancellationToken);
-            var token = _electionCts.Token;
-
-            await DeregisterPreviousServiceAsync(token);
-            await RegisterServiceAsync(token);
-            await VerifyServiceRegistrationAsync(token);
-
-            var sessionId = await CreateSessionAsync(token);
-            _logger.LogInformation("Created Consul session: {SessionId}", sessionId);
-
-            _electionTask = RunLeaderElectionAsync(sessionId, token);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error starting leader election");
-            throw new LeadershipException("Failed to start leadership election", ex);
-        }
-    }
-
-    /// <summary>
-    /// Deregisters any previous instances of the service
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token</param>
-    private async Task DeregisterPreviousServiceAsync(CancellationToken cancellationToken)
-    {
-        // Off by default. Agent.Services lists everything on the local agent, so
-        // deregistering every other instance of this service name takes down siblings
-        // that share the agent. Re-registering with the same ID already replaces a
-        // previous incarnation of this instance, and Consul removes registrations whose
-        // health check has been failing for DeregisterCriticalServiceAfter.
-        if (!_serviceOptions.DeregisterSiblingInstancesOnStart)
-        {
-            return;
-        }
-
-        try
-        {
-            var services = await _consulClient.Agent.Services(cancellationToken);
-            if (services?.Response != null)
-            {
-                var staleServices = services.Response
-                    .Where(s => s.Value.Service == _options.ServiceName && s.Key != _instanceId)
-                    .Select(s => s.Key);
-
-                foreach (var serviceId in staleServices)
-                {
-                    try
-                    {
-                        _logger.LogInformation("Attempting to deregister stale service: {ServiceId}", serviceId);
-                        await _consulClient.Agent.ServiceDeregister(serviceId, cancellationToken);
-                        _logger.LogInformation("Successfully deregistered stale service: {ServiceId}", serviceId);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to deregister stale service: {ServiceId}", serviceId);
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error during service cleanup");
-        }
-    }
-
-    /// <summary>
-    /// Registers this instance as a service in Consul
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token</param>
-    private async Task RegisterServiceAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            var registration = CreateServiceRegistration();
-
-            _logger.LogInformation("Registering service with ID: {ServiceId}, Address: {Address}, Port: {Port}",
-                _instanceId, registration.Address, registration.Port);
-
-            await _consulClient.Agent.ServiceRegister(registration, cancellationToken);
-            _logger.LogInformation("Service registered in Consul with ID: {ServiceId}", _instanceId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to register service: {ServiceId}", _instanceId);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Creates the service registration configuration
-    /// </summary>
-    /// <returns>The service registration configuration</returns>
-    private AgentServiceRegistration CreateServiceRegistration()
-    {
-        // Every one of these used to be hardcoded, so five of the six properties on
-        // ServiceRegistrationOptions were silently ignored: setting HealthCheckEndpoint
-        // to "/healthz" changed nothing at all.
-        var address = GetHostAddress();
-        var endpoint = string.IsNullOrWhiteSpace(_serviceOptions.HealthCheckEndpoint)
-            ? "/health"
-            : "/" + _serviceOptions.HealthCheckEndpoint.TrimStart('/');
-
-        return new AgentServiceRegistration
-        {
-            ID = _instanceId,
-            Name = _options.ServiceName,
-            Tags = _serviceOptions.Tags,
-            Port = _serviceOptions.ServicePort,
-            Address = address,
-            Check = new AgentServiceCheck
-            {
-                DeregisterCriticalServiceAfter =
-                    TimeSpan.FromSeconds(_serviceOptions.DeregisterCriticalServiceAfter),
-                HTTP = $"http://{address}:{_serviceOptions.ServicePort}{endpoint}",
-                Interval = TimeSpan.FromSeconds(_serviceOptions.HealthCheckInterval),
-                Timeout = TimeSpan.FromSeconds(_serviceOptions.HealthCheckTimeout)
-            }
-        };
-    }
-
-    /// <summary>
-    /// Verifies that the service was successfully registered in Consul
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token</param>
-    private async Task VerifyServiceRegistrationAsync(CancellationToken cancellationToken)
-    {
-        var retryCount = 0;
-
-        while (retryCount < _options.VerificationRetries)
-        {
-            try
-            {
-                var services = await _consulClient.Agent.Services(cancellationToken);
-
-                if (services?.Response == null)
-                {
-                    _logger.LogWarning("Consul returned null response when querying services");
-                }
-                else if (services.Response.TryGetValue(_instanceId, out var registeredService))
-                {
-                    _logger.LogInformation("Service registration verified. Found service with ID: {ServiceId}", _instanceId);
-                    return;
-                }
-                else
-                {
-                    _logger.LogWarning("Service not found in verification attempt {Attempt}/{MaxAttempts}",
-                        retryCount + 1, _options.VerificationRetries);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Error verifying service registration on attempt {Attempt}/{MaxAttempts}",
-                    retryCount + 1, _options.VerificationRetries);
-            }
-
-            retryCount++;
-            if (retryCount < _options.VerificationRetries)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(_options.VerificationRetryDelay), cancellationToken);
-            }
-        }
-
-        _logger.LogWarning("Service verification did not succeed after {MaxAttempts} attempts, but continuing...",
-            _options.VerificationRetries);
-    }
-
-    /// <summary>
-    /// Creates a new session in Consul
-    /// </summary>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>The session ID</returns>
-    private async Task<string> CreateSessionAsync(CancellationToken cancellationToken)
-    {
-        var sessionEntry = new SessionEntry
-        {
-            Name = _instanceId,
-            TTL = TimeSpan.FromSeconds(_options.SessionTTL),
-            Behavior = SessionBehavior.Delete
-        };
-
-        var sessionId = (await _consulClient.Session.Create(sessionEntry, cancellationToken)).Response;
-        _currentCampaignSessionId = sessionId;
-        _sessionRenewalTask = RenewSessionAsync(sessionId, cancellationToken);
-        return sessionId;
-    }
-
-    /// <summary>
-    /// Runs the leader election loop
-    /// </summary>
-    /// <param name="sessionId">The session ID to use for leadership</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    private async Task RunLeaderElectionAsync(string sessionId, CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                var pair = new KVPair(_lockKey)
-                {
-                    Session = sessionId,
-                    Value = Encoding.UTF8.GetBytes(_instanceId)
-                };
-
-                var acquiredLock = await _consulClient.KV.Acquire(pair, cancellationToken);
-
-                if (acquiredLock.Response && !_isLeader)
-                {
-                    _isLeader = true;
-                    await RaiseLeadershipAcquiredEvent();
-                }
-                else if (!acquiredLock.Response && _isLeader)
-                {
-                    _isLeader = false;
-                    await RaiseLeadershipLostEvent();
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(_options.LeaderCheckInterval), cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex) when (IsSessionInvalid(ex))
-            {
-                // Consul answers an Acquire against a dead session with HTTP 500, which
-                // surfaces as an exception rather than a false result. Without this
-                // branch the loop never reaches the code that lowers _isLeader, so the
-                // node keeps believing it leads while a successor already does, and it
-                // never rebuilds its session so it can never lead again.
-                _logger.LogWarning(ex,
-                    "Consul session {SessionId} is no longer valid; standing down and recreating it",
-                    sessionId);
-
-                if (_isLeader)
-                {
-                    _isLeader = false;
-                    await RaiseLeadershipLostEvent();
-                }
-
-                try
-                {
-                    sessionId = await RecreateSessionAsync(cancellationToken);
-                    _logger.LogInformation("Recreated Consul session: {SessionId}", sessionId);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception recreateEx)
-                {
-                    _logger.LogError(recreateEx, "Failed to recreate Consul session; will retry");
-                }
-
-                await DelayQuietlyAsync(TimeSpan.FromSeconds(1), cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in leader election loop");
-                await DelayQuietlyAsync(TimeSpan.FromSeconds(1), cancellationToken);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Replaces the session used by the campaign loop after Consul invalidated it, and
-    /// restarts the renewal loop that goes with it.
-    /// </summary>
-    private async Task<string> RecreateSessionAsync(CancellationToken cancellationToken)
-    {
-        var sessionEntry = new SessionEntry
-        {
-            Name = _instanceId,
-            TTL = TimeSpan.FromSeconds(_options.SessionTTL),
-            Behavior = SessionBehavior.Delete
-        };
-
-        var sessionId = (await _consulClient.Session.Create(sessionEntry, cancellationToken)).Response;
-        _currentCampaignSessionId = sessionId;
-        _sessionRenewalTask = RenewSessionAsync(sessionId, cancellationToken);
-        return sessionId;
-    }
-
-    /// <summary>
-    /// Renews the session periodically to maintain leadership
-    /// </summary>
-    /// <param name="sessionId">The session ID to renew</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    private async Task RenewSessionAsync(string sessionId, CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                await _consulClient.Session.Renew(sessionId, cancellationToken);
-                await Task.Delay(TimeSpan.FromSeconds(_options.RenewInterval), cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex) when (IsSessionInvalid(ex))
-            {
-                // This session is gone for good; retrying it forever would keep the node
-                // permanently ineligible. The election loop owns rebuilding it, so this
-                // loop simply stops and lets the replacement loop take over.
-                _logger.LogWarning(ex,
-                    "Session {SessionId} expired; stopping its renewal loop", sessionId);
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error renewing session");
-                await DelayQuietlyAsync(TimeSpan.FromSeconds(1), cancellationToken);
-            }
-        }
-    }
-
-    /// <summary>
-    /// True when Consul is telling us the session no longer exists, in whichever of the
-    /// several shapes it uses to say so.
-    /// </summary>
-    private static bool IsSessionInvalid(Exception ex) =>
-        ex is SessionExpiredException ||
-        (ex is ConsulRequestException requestException && ConsulLeadershipLease.IsSessionGone(requestException));
-
-    /// <summary>
-    /// Delays without turning cancellation into an exception the caller has to catch.
-    /// </summary>
-    private static async Task DelayQuietlyAsync(TimeSpan delay, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await Task.Delay(delay, cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            // Caller's loop condition handles it.
-        }
-    }
-
-    /// <summary>
-    /// Checks if this instance is currently the leader
-    /// </summary>
-    /// <returns>True if this instance is the leader, false otherwise</returns>
-    [Obsolete(
-        "IsLeaderAsync has a check-then-act race: leadership can move to another " +
-        "instance between this call and the work it guards, so two instances can " +
-        "run the same work concurrently. Use " +
-        "ILeadershipLeaseProvider.TryAcquireLeadershipAsync, hold the returned " +
-        "ILeadershipLease for the duration of the work, observe its LostToken, and " +
-        "pass its FencingToken to the resource you are protecting. See " +
-        "https://github.com/FrancoPachue/dleader-consul#what-this-does-not-guarantee")]
-    public async Task<bool> IsLeaderAsync()
-    {
-        ThrowIfDisposed();
-        try
-        {
-            var currentLeader = await GetCurrentLeaderAsync();
-            return currentLeader == _instanceId;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error checking leadership status");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Gets the ID of the instance that is currently the leader
-    /// </summary>
-    /// <returns>The instance ID of the current leader, or empty string if no leader</returns>
-    /// <exception cref="ConsulException">Thrown when unable to get the current leader</exception>
-    public async Task<string> GetCurrentLeaderAsync()
-    {
-        ThrowIfDisposed();
-        try
-        {
-            var pair = await _consulClient.KV.Get(_lockKey, CancellationToken.None);
-            if (pair.Response is null)
-                return string.Empty;
-
-            // A key with no session attached is a leftover from a leader that failed or
-            // released, not a leader. Sessions using Release behaviour leave the old
-            // value in place, so reporting the value without this check would name an
-            // instance that is no longer leading.
-            if (string.IsNullOrEmpty(pair.Response.Session))
-                return string.Empty;
-
-            // Consul represents an empty value as a null byte array.
-            if (pair.Response.Value is null)
-                return string.Empty;
-
-            return Encoding.UTF8.GetString(pair.Response.Value);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting current leader");
-            throw new ConsulException("Failed to get current leader", ex);
-        }
-    }
-
-    /// <summary>
-    /// Gets the host address for the service registration
-    /// </summary>
-    /// <returns>The host address</returns>
-    private string GetHostAddress()
-    {
-        if (!string.IsNullOrWhiteSpace(_serviceOptions.ServiceAddress))
-        {
-            return _serviceOptions.ServiceAddress;
-        }
-
-        // The fallback matches the one used to build the instance id. It used to be the
-        // literal "localhost", which disagreed with the instance id and registered a
-        // health check aimed at whichever host the Consul agent runs on.
-        return Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName;
-    }
-
-    /// <summary>
-    /// Raises the leadership acquired event
-    /// </summary>
-    /// <returns>A task representing the event handling</returns>
-    public async Task RaiseLeadershipAcquiredEvent()
-    {
-        if (OnLeadershipAcquired != null)
-        {
-            try
-            {
-                await OnLeadershipAcquired.Invoke();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in OnLeadershipAcquired event handler");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Raises the leadership lost event
-    /// </summary>
-    /// <returns>A task representing the event handling</returns>
-    public async Task RaiseLeadershipLostEvent()
-    {
-        if (OnLeadershipLost != null)
-        {
-            try
-            {
-                await OnLeadershipLost.Invoke();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in OnLeadershipLost event handler");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Throws an ObjectDisposedException if the instance has been disposed
-    /// </summary>
-    /// <exception cref="ObjectDisposedException">Thrown if the instance has been disposed</exception>
+    /// <exception cref="ObjectDisposedException">Thrown if the instance has been disposed.</exception>
     protected virtual void ThrowIfDisposed()
     {
-        if (_disposed)
-        {
-            throw new ObjectDisposedException(nameof(ConsulLeaderElection));
-        }
+        ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
     /// <summary>
-    /// Releases the resources used by the instance.
+    /// Releases the resources used by this instance.
     /// </summary>
     /// <remarks>
-    /// Prefer <see cref="DisposeAsync"/>. This overload exists because the DI container
-    /// may resolve <see cref="IDisposable"/>, and it has to do the same cleanup rather
-    /// than leave the lock held until the session times out. The work is pushed to the
-    /// thread pool before being waited on, which is what keeps a direct blocking wait
-    /// from deadlocking against an ambient synchronization context, and it is bounded
-    /// by a timeout so that an unreachable Consul cannot hang shutdown.
+    /// This type holds no leases of its own — each lease owns its session and releases
+    /// it on disposal — so there is nothing here that can block. Dispose any leases you
+    /// are holding before disposing this.
     /// </remarks>
     public void Dispose()
     {
         if (_disposed)
         {
-            GC.SuppressFinalize(this);
             return;
         }
 
-        try
+        _disposed = true;
+
+        if (_ownsClient)
         {
-            if (!Task.Run(() => DisposeAsync().AsTask()).Wait(SyncDisposeTimeout))
-            {
-                _logger.LogWarning(
-                    "Synchronous disposal of {ServiceId} timed out after {Timeout}",
-                    _instanceId, SyncDisposeTimeout);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error during synchronous disposal for service: {ServiceId}", _instanceId);
+            _consulClient.Dispose();
         }
 
         GC.SuppressFinalize(this);
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (_disposed)
-            return;
-
-        try
-        {
-            _cts?.Cancel();
-
-            // Wait for background tasks to finish gracefully
-            var tasks = new List<Task>();
-            if (_electionTask != null) tasks.Add(_electionTask);
-            if (_sessionRenewalTask != null) tasks.Add(_sessionRenewalTask);
-
-            if (tasks.Any())
-            {
-                try
-                {
-                    await Task.WhenAll(tasks);
-                }
-                catch (OperationCanceledException) { /* Expected */ }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error waiting for background tasks to complete");
-                }
-            }
-
-            _logger.LogInformation("Disposing service with ID: {ServiceId}", _instanceId);
-            await _consulClient.Agent.ServiceDeregister(_instanceId, CancellationToken.None);
-            _logger.LogInformation("Service deregistered from Consul: {ServiceId}", _instanceId);
-
-            if (_isLeader)
-            {
-                // Release is scoped to this instance's session, so Consul refuses it if
-                // the lock has already moved on. An unconditional delete would instead
-                // rip the lock away from whoever holds it now - which is exactly what
-                // happens when _isLeader is a stale true.
-                var released = await _consulClient.KV.Release(new KVPair(_lockKey)
-                {
-                    Session = _currentCampaignSessionId,
-                    Value = Encoding.UTF8.GetBytes(_instanceId)
-                }, CancellationToken.None);
-
-                _logger.LogInformation(
-                    "Leadership lock release for service {ServiceId} accepted: {Accepted}",
-                    _instanceId, released.Response);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error during async disposal for service: {ServiceId}", _instanceId);
-        }
-        finally
-        {
-            _electionCts?.Dispose();
-            _cts?.Dispose();
-            // Do not dispose injected client as it might be shared
-        }
-        _disposed = true;
+        Dispose();
+        return ValueTask.CompletedTask;
     }
 }

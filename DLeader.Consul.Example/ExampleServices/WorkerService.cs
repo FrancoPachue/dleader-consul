@@ -2,6 +2,7 @@
 // lo sigue demostrando a proposito mientras siga formando parte de este paquete.
 #pragma warning disable CS0618
 ﻿using DLeader.Consul.Abstractions;
+using DLeader.Consul.Messaging;
 
 namespace DLeader.Consul.Example.Services
 {

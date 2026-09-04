@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-04
+
+One way to elect a leader, and one set of guarantees to keep.
+
+1.11 added the lease API alongside the campaign API and deprecated `IsLeaderAsync`.
+Keeping both meant two implementations of the same idea, contending for the same lock
+key with separate sessions and different guarantees — enough of a hazard that using both
+on one instance had to throw. This removes the older one.
+
+### Removed
+
+- **`ILeaderElection`, entirely** — `StartLeaderElectionAsync`, `IsLeaderAsync`,
+  `GetCurrentLeaderAsync`, and the `OnLeadershipAcquired` / `OnLeadershipLost` events.
+  `IsLeaderAsync` was `[Obsolete]` for two releases; the rest went with it because a
+  second path to leadership is the problem, not the deprecated method on it.
+- **Consul service registration**, `ServiceRegistrationOptions`, and the HTTP health
+  check. Only `StartLeaderElectionAsync` used them, and with it gone the leadership
+  package no longer registers anything with Consul or depends on
+  `Microsoft.Extensions.Hosting.Abstractions`.
+- `ConsulOptions.LeaderCheckInterval`, `RenewInterval`, `VerificationRetries` and
+  `VerificationRetryDelay` — all campaign-only.
+- `AddConsulLeadership`. Use `AddConsulLeaderElection`, and
+  `AddConsulMessaging` from the messaging package if you want both.
+- The mode guard that existed solely to stop the two APIs competing.
+- **`IMessageBroker` moved to [`DLeader.Consul.Messaging`](https://www.nuget.org/packages/DLeader.Consul.Messaging)**,
+  a new package. It has nothing to do with leader election, and shipping a non-durable
+  KV-backed fan-out inside a package that promises leadership guarantees invited it to
+  be mistaken for a queue. Deprecated in 1.13.
+
+### Added
+
+- **`LeaderElectedService`**, a `BackgroundService` base class implementing the
+  acquire/hold/release loop. Override `ExecuteAsLeaderAsync`; it runs once per
+  leadership term with a token cancelled the moment the term ends, and receives the
+  lease so it can pass the fencing token onward — which the removed events could not do.
+  It is a convenience with no path to Consul of its own.
+
+### Changed
+
+- `InstanceId` is now unique per instance rather than per process and port. It names the
+  Consul sessions an instance creates, so two instances sharing one would be
+  indistinguishable in Consul's session list.
+- `ConsulLeaderElection` disposes the Consul client only when it created it. A client
+  you supply is yours.
+
+### Migration
+
+[MIGRATION.md](MIGRATION.md). If you moved to the lease API during 1.11–1.13, this is a
+version bump. If you are still on `IsLeaderAsync`, that guide is the work.
+
 ## [1.13.0] - 2026-09-04
 
 Answers the question this library could not answer before: *why* did leadership move.
@@ -254,7 +304,8 @@ derived the package version from it, which NuGet normalised to `1.10.0` — so t
 published version is correct. The project file, however, still said `1.0.0`, which is
 fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 
-[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.13.0...HEAD
+[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.13.0...v2.0.0
 [1.13.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.10...v1.11.0

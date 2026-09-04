@@ -1,3 +1,4 @@
+using DLeader.Consul.Messaging;
 using System.Collections.Concurrent;
 using DLeader.Consul.Configuration;
 using DLeader.Consul.Implementations;
