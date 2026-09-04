@@ -1,8 +1,10 @@
 using Consul;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 using System.Text;
 using DLeader.Consul.Configuration;
 using DLeader.Consul.Abstractions;
+using DLeader.Consul.Diagnostics;
 using DLeader.Consul.Exceptions;
 using Microsoft.Extensions.Options;
 
@@ -133,6 +135,11 @@ public class ConsulLeaderElection :
 
         string? sessionId = null;
 
+        using var activity = LeadershipTelemetry.ActivitySource.StartActivity(
+            "TryAcquireLeadership", ActivityKind.Client);
+        activity?.SetTag("dleader.service", _options.ServiceName);
+        activity?.SetTag("dleader.instance_id", _instanceId);
+
         try
         {
             sessionId = await CreateLeaseSessionAsync(ttl, cancellationToken);
@@ -149,6 +156,9 @@ public class ConsulLeaderElection :
                 // Either someone else holds it, or Consul's lock delay from a previous
                 // holder's failure has not elapsed yet. Both are ordinary outcomes.
                 await DestroySessionQuietlyAsync(sessionId);
+
+                activity?.SetTag("dleader.outcome", "contended");
+                RecordAcquisition("contended");
                 return null;
             }
 
@@ -170,6 +180,9 @@ public class ConsulLeaderElection :
                     _lockKey, confirmation.Response?.Session ?? "nobody");
 
                 await DestroySessionQuietlyAsync(sessionId);
+
+                activity?.SetTag("dleader.outcome", "contended");
+                RecordAcquisition("contended");
                 return null;
             }
 
@@ -186,6 +199,7 @@ public class ConsulLeaderElection :
                 _lockKey,
                 _instanceId,
                 sessionId,
+                _options.ServiceName,
                 (long)modifyIndex,
                 modifyIndex,
                 ttl,
@@ -195,6 +209,20 @@ public class ConsulLeaderElection :
             _logger.LogInformation(
                 "Acquired leadership lease for {InstanceId} with fencing token {FencingToken}",
                 _instanceId, lease.FencingToken);
+
+            activity?.SetTag("dleader.outcome", "acquired");
+            activity?.SetTag("dleader.fencing_token", lease.FencingToken);
+
+            RecordAcquisition("acquired");
+
+            LeadershipTelemetry.Held.Add(1,
+                new KeyValuePair<string, object?>("service", _options.ServiceName));
+
+            // Emitted so a monitoring system can alert on the token going backwards,
+            // which would mean the Consul cluster was restored or rebuilt and the
+            // assumption fencing rests on no longer holds.
+            LeadershipTelemetry.FencingTokenIssued.Add(lease.FencingToken,
+                new KeyValuePair<string, object?>("service", _options.ServiceName));
 
             return lease;
         }
@@ -211,6 +239,10 @@ public class ConsulLeaderElection :
             }
 
             _logger.LogError(ex, "Error acquiring leadership lease for {InstanceId}", _instanceId);
+
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            RecordAcquisition("failed");
+
             throw new LeadershipException("Failed to acquire leadership lease", ex);
         }
     }
@@ -298,6 +330,11 @@ public class ConsulLeaderElection :
         var result = await _consulClient.Session.Create(sessionEntry, cancellationToken);
         return result.Response;
     }
+
+    private void RecordAcquisition(string outcome) =>
+        LeadershipTelemetry.Acquisitions.Add(1,
+            new KeyValuePair<string, object?>("service", _options.ServiceName),
+            new KeyValuePair<string, object?>("outcome", outcome));
 
     private async Task DestroySessionQuietlyAsync(string sessionId)
     {

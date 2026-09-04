@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-09-04
+
+Answers the question this library could not answer before: *why* did leadership move.
+
+### Added
+
+- **Telemetry.** An `ActivitySource` and a `Meter`, both named `DLeader.Consul`, wired
+  up through `LeadershipTelemetry.ActivitySourceName` / `.MeterName`.
+
+  The instrument that matters is `dleader.consul.leadership.lost` and its `reason` tag.
+  A leader that stood down because Consul expired its session
+  (`session_expired`, `lock_key_taken`) is a different incident from one that stood down
+  because it could not reach Consul and gave up on its own clock
+  (`local_deadline_exceeded`) — the second is what a network partition looks like from
+  inside the process. Until now the two were distinguishable only by reading log prose.
+
+  Also published: acquisitions by outcome, leases currently held, term duration, session
+  renewals by outcome, and fencing tokens issued. The last is worth an alert on
+  *decrease*: a token going backwards means the assumption fencing rests on has been
+  violated, which in practice means the Consul cluster was restored from a snapshot.
+
+- `ILeadershipLease.LostReason` exposes the same reason in code, for callers that want
+  to react differently to a partition than to an orderly hand-off. Added as a default
+  interface member, so existing implementations keep compiling.
+- **[MIGRATION.md](MIGRATION.md)** — moving from `IsLeaderAsync` to leases, step by
+  step, including the step people skip: making the target resource compare the fencing
+  token.
+- **Cluster failure tests.** A three-server Consul cluster with real Raft, exercising
+  quorum loss, Raft leader failover, and recovery. Every previous test ran against
+  `consul agent -dev`: a single node with no quorum to lose. The README claims the
+  leadership guarantees are Consul's, inherited — that claim was untested until now.
+
+### Deprecated
+
+- `IMessageBroker` is `[Obsolete]`. It moves to a separate `DLeader.Consul.Messaging`
+  package in 2.0. It has nothing to do with leader election, and shipping a non-durable
+  KV-backed fan-out inside a package that promises leadership guarantees invites it to
+  be mistaken for a queue. Nothing changes until 2.0.
+
+### Notes
+
+`ILeaderElection` will be removed **entirely** in 2.0 — not just `IsLeaderAsync` — along
+with the Consul service registration that only it used. Two APIs contending for the same
+lock key with different guarantees is the opposite of what the last three releases were
+for. See [MIGRATION.md](MIGRATION.md).
+
 ## [1.12.0] - 2026-09-04
 
 Closes the gaps opened as issues alongside 1.11.0.
@@ -208,7 +254,8 @@ derived the package version from it, which NuGet normalised to `1.10.0` — so t
 published version is correct. The project file, however, still said `1.0.0`, which is
 fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 
-[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.12.0...HEAD
+[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v1.13.0...HEAD
+[1.13.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.10...v1.11.0
 [1.10.0]: https://github.com/FrancoPachue/dleader-consul/releases/tag/v1.10

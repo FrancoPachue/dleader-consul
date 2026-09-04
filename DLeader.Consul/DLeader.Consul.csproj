@@ -5,10 +5,9 @@
 
     <!-- NuGet Package Information -->
     <PackageId>DLeader.Consul</PackageId>
-    <Version>1.12.0</Version>
+    <Version>1.13.0</Version>
     <Authors>FrancoPachue</Authors>
     <Description>Distributed leader election for .NET on HashiCorp Consul, with leases that carry a fencing token and signal loss of leadership through a cancellation token.</Description>
-    <PackageTags>consul;leader-election;distributed-systems;dotnet;microservices;distributed-lock;fencing-token</PackageTags>
     <PackageProjectUrl>https://github.com/FrancoPachue/dleader-consul</PackageProjectUrl>
     <RepositoryUrl>https://github.com/FrancoPachue/dleader-consul</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -16,6 +15,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReleaseNotes>See CHANGELOG.md</PackageReleaseNotes>
+    <PackageTags>consul;leader-election;distributed-systems;dotnet;microservices;distributed-lock;fencing-token;opentelemetry</PackageTags>
 
     <!-- Source Link -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
@@ -31,6 +31,9 @@
 
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)..\README.md" Pack="true" PackagePath="\" />
+    <!-- Shipped in the package so the upgrade path travels with the thing being
+         upgraded, rather than living only in a repo the consumer may never open. -->
+    <None Include="$(MSBuildThisFileDirectory)..\MIGRATION.md" Pack="true" PackagePath="\" />
     <None Include="$(MSBuildThisFileDirectory)..\icon.png" Pack="true" PackagePath="\" />
   </ItemGroup>
 

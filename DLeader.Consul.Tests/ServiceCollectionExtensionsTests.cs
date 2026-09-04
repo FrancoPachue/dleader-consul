@@ -1,3 +1,6 @@
+// Estos tests cubren a proposito el registro de IMessageBroker, que sigue
+// existiendo hasta que 2.0 lo mude a su propio paquete.
+#pragma warning disable CS0618
 ﻿using Xunit;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;

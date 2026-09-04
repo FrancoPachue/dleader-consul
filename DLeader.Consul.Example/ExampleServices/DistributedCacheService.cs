@@ -1,3 +1,6 @@
+// IMessageBroker esta deprecado y se muda a su propio paquete en 2.0. El sample
+// lo sigue demostrando a proposito mientras siga formando parte de este paquete.
+#pragma warning disable CS0618
 ﻿using DLeader.Consul.Abstractions;
 using System.Collections.Concurrent;
 using System.Text.Json;

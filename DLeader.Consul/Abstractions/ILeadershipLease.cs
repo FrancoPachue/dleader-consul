@@ -88,4 +88,24 @@ public interface ILeadershipLease : IAsyncDisposable
     /// </para>
     /// </remarks>
     long FencingToken { get; }
+
+    /// <summary>
+    /// Why the lease was lost, once <see cref="LostToken"/> has been cancelled.
+    /// <see langword="null"/> while the lease is still held.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The distinction worth acting on is between
+    /// <see cref="LeadershipLostReason.SessionExpired"/> and
+    /// <see cref="LeadershipLostReason.LocalDeadlineExceeded"/>. The first means Consul
+    /// decided this instance was gone. The second means this instance could not reach
+    /// Consul to be told anything and stood down on its own clock — which is what a
+    /// network partition looks like from in here.
+    /// </para>
+    /// <para>
+    /// The default implementation returns <see langword="null"/> so that adding this
+    /// member did not break existing implementations of the interface.
+    /// </para>
+    /// </remarks>
+    LeadershipLostReason? LostReason => null;
 }
