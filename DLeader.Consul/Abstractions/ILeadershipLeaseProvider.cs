@@ -42,9 +42,17 @@ public interface ILeadershipLeaseProvider
     /// Abandons the attempt. Like <see cref="TryAcquireLeadershipAsync"/>, it is linked
     /// to the resulting lease's <see cref="ILeadershipLease.LostToken"/>.
     /// </param>
-    /// <returns>A held lease. This method does not return without one.</returns>
+    /// <returns>A held lease. It never returns <see langword="null"/>.</returns>
     /// <exception cref="OperationCanceledException">
     /// The token was cancelled before leadership was won.
+    /// </exception>
+    /// <exception cref="Exceptions.LeadershipException">
+    /// Consul could not be reached, or refused the request. This method waits for the
+    /// lock to become free; it does not wait for Consul to come back. Swallowing that
+    /// and retrying forever would make a wrong <c>Address</c> or a rejected ACL token
+    /// look exactly like a service that is patiently waiting its turn, which is the
+    /// worse failure. Callers that want to ride out an outage should catch this, log
+    /// it, and call again after a delay — <c>LeaderElectedService</c> does exactly that.
     /// </exception>
     /// <remarks>
     /// <para>

@@ -182,6 +182,52 @@ public class TelemetryTests
         }
     }
 
+    /// <summary>
+    /// The watchdog fires at TTL minus the safety margin: 8 seconds by default. Renewing
+    /// at half the TTL left exactly one attempt inside that window with three seconds
+    /// of headroom, so a renewal Consul accepted but answered slowly still lost the
+    /// lease. Renewing at a third puts two attempts inside the window. This pins that
+    /// down through the renewal metric rather than by timing a slow Consul, which
+    /// would be a flake.
+    /// </summary>
+    [Fact]
+    public async Task AHeldLease_RenewsAtLeastTwice_BeforeTheLocalDeadlineWouldFire()
+    {
+        var consul = new ConsulContainer();
+        await consul.InitializeAsync();
+
+        try
+        {
+            using var renewals = new Recorder("dleader.consul.session.renewals");
+
+            var serviceName = ConsulContainer.NewServiceName();
+            await using var node = consul.CreateNode(
+                serviceName, servicePort: 5001, sessionTtlSeconds: 10, safetyMarginSeconds: 2);
+
+            await using var lease = await node.TryAcquireLeadershipAsync();
+            Assert.NotNull(lease);
+
+            // Just past the 8-second deadline. With renewal at TTL/3 there have been
+            // two by now (3.3s, 6.7s); at TTL/2 there would have been one (5s).
+            await Task.Delay(TimeSpan.FromSeconds(8.5));
+
+            Assert.False(lease!.LostToken.IsCancellationRequested,
+                "a healthy lease against a healthy agent was declared lost");
+
+            var successful = renewals.Measurements
+                .Where(m => Equals(m.Tags.GetValueOrDefault("service"), serviceName))
+                .Where(m => Equals(m.Tags.GetValueOrDefault("outcome"), "ok"))
+                .Sum(m => m.Value);
+
+            Assert.True(successful >= 2,
+                $"expected at least two successful renewals inside the deadline window, saw {successful}");
+        }
+        finally
+        {
+            await consul.DisposeAsync();
+        }
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string because)
     {
         var deadline = DateTime.UtcNow + timeout;

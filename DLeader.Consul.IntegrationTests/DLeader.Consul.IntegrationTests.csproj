@@ -7,6 +7,14 @@
 
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+
+    <!-- dotnet test runs a multi-targeted project's frameworks in parallel by default,
+         which here means three copies of a container-heavy suite starting Consul
+         agents at the same moment. LeaseWatchdogTests - which starts and stops its own
+         agent per test - failed under that load and passed alone, on a machine that
+         had just run the same suite green. The tests are right; the oversubscription
+         is not. Sequential costs about a minute and removes the flake. -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
   </PropertyGroup>
 
   <ItemGroup>
