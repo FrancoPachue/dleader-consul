@@ -75,6 +75,7 @@ public sealed class ConsulContainer : IAsyncLifetime
     /// <summary>Stops the agent so that every Consul call from the library fails.</summary>
     public Task StopAgentAsync() => _container.StopAsync();
 
+
     public IConsulClient CreateClient() =>
         new ConsulClient(cfg =>
         {

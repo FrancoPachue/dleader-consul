@@ -159,7 +159,24 @@ public class ConsulMessageBroker : IMessageBroker, IDisposable, IAsyncDisposable
 
                 // Consul's blocking-query contract: an index that moves backwards means
                 // the state was reset, and the client must restart from zero.
-                lastIndex = response.LastIndex < lastIndex ? 0 : response.LastIndex;
+                //
+                // Both markers have to reset, not just the wait index. After a restore
+                // every new message carries a ModifyIndex below the old high-water
+                // mark, and a dispatchedThrough left at the old value would filter all
+                // of them out - silently, forever, until the process restarted.
+                if (response.LastIndex < lastIndex)
+                {
+                    _logger.LogWarning(
+                        "Consul index went backwards for {MessageType} ({Previous} -> {Current}); resetting the watch",
+                        messageType, lastIndex, response.LastIndex);
+
+                    lastIndex = 0;
+                    dispatchedThrough = 0;
+                }
+                else
+                {
+                    lastIndex = response.LastIndex;
+                }
 
                 if (response.Response is null)
                 {

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-05
+
+Findings from a fresh read of the 2.0 code. Nothing here changes the public contract;
+two of the fixes change observable behaviour in ways that were wrong before.
+
+### Fixed
+
+- **A healthy but slow Consul could cost a lease.** The watchdog fires at
+  `SessionTTL - LeaseSafetyMarginSeconds` — 8 seconds by default — and the session was
+  renewed at half the TTL, at 5. That left exactly one renewal inside the window with
+  three seconds of headroom: a renewal Consul accepted but answered in 3.1 seconds had
+  the lease declare itself lost anyway, with `LocalDeadlineExceeded`, over nothing.
+  Renewal now runs at a third of the TTL, so a slow success or a failure and a retry
+  both fit before the deadline. Covered by a test that counts renewals through the
+  telemetry rather than by timing a slow agent, which would have been a flake.
+- **The message broker dropped everything after a Consul index reset.** On an index
+  going backwards — a snapshot restore, or a rebuilt cluster — the watch reset its wait
+  index but not its dispatch high-water mark, so every subsequent message carried an
+  index below the mark and was filtered out silently until the process restarted.
+  Both reset now, with a warning logged. The fix is one line and evident on read; an
+  integration test for it would have to restart Consul, which remaps the container port
+  under Testcontainers, so it is verified by inspection rather than a flaky test.
+- **A consumer callback that threw on `LostToken` faulted the detector loop.**
+  `Cancel()` runs registered callbacks synchronously and rethrows what they throw. The
+  lease was already correctly lost by then; what was wrong was the watchdog or renewal
+  loop faulting over someone else's bug and disposal reporting it as its own. Caught
+  and logged as what it is.
+- **`LeaderElectedService.OnLeadershipEndedAsync` received `null` for every voluntary
+  return.** The reason was read before the lease was disposed, and disposal is what
+  records `Released` or `Cancelled` for a term no detector ended. Read after disposal
+  now; the hook never receives `null`. The parameter stays nullable so that overrides
+  written against 2.0.0 keep compiling. `LeaderElectedService` had no tests at all —
+  it has four now.
+- `LeaderElectedService` logs acquisition failures and leader-work failures with
+  different messages. They point at different people.
+
+### Changed
+
+- `ILeadershipLeaseProvider.AcquireLeadershipAsync` documents that it throws
+  `LeadershipException` when Consul cannot be reached, rather than waiting for Consul
+  to come back. It always did; the documentation claimed otherwise. Waiting silently
+  through an outage would make a wrong `Address` or a rejected ACL token look like a
+  service patiently waiting its turn, which is the worse failure. Callers that want to
+  ride out an outage catch and retry, as `LeaderElectedService` does.
+- The integration test project runs its three target frameworks sequentially. Running
+  them in parallel put three copies of a container-heavy suite on one Docker at once,
+  and the tests that start and stop their own agent failed under that load and passed
+  alone. The suite takes a minute longer and stops lying about the code.
+
 ## [2.0.0] - 2026-09-04
 
 One way to elect a leader, and one set of guarantees to keep.
@@ -304,7 +353,8 @@ derived the package version from it, which NuGet normalised to `1.10.0` — so t
 published version is correct. The project file, however, still said `1.0.0`, which is
 fixed in 1.11.0 along with a CI check that the tag and `<Version>` agree.
 
-[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/FrancoPachue/dleader-consul/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/FrancoPachue/dleader-consul/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.13.0...v2.0.0
 [1.13.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/FrancoPachue/dleader-consul/compare/v1.11.0...v1.12.0

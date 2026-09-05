@@ -116,14 +116,22 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
     }
 
     /// <summary>
-    /// Keeps the Consul session alive. Renews at half the TTL, and backs off to a short
-    /// retry after a transient failure so that one failed round trip does not consume
-    /// the whole margin.
+    /// Keeps the Consul session alive. Renews at a third of the TTL, and backs off to a
+    /// short retry after a transient failure so that one failed round trip does not
+    /// consume the whole margin.
     /// </summary>
+    /// <remarks>
+    /// A third rather than a half, because the watchdog fires at
+    /// <c>TTL - LeaseSafetyMarginSeconds</c>. With the defaults that is 8 seconds, and
+    /// renewing at 5 left a single attempt with 3 seconds of headroom: one renewal that
+    /// Consul accepted but took longer than that to answer would have had the lease
+    /// declare itself lost anyway. Renewing at 3.3 leaves room for a slow success or a
+    /// failure and a retry before the deadline.
+    /// </remarks>
     private async Task RenewalLoopAsync()
     {
         var token = _lostCts.Token;
-        var normalInterval = TimeSpan.FromMilliseconds(_ttl.TotalMilliseconds / 2);
+        var normalInterval = TimeSpan.FromMilliseconds(_ttl.TotalMilliseconds / 3);
         var retryInterval = TimeSpan.FromMilliseconds(Math.Max(250, _ttl.TotalMilliseconds / 10));
         var delay = normalInterval;
 
@@ -298,6 +306,22 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
             new KeyValuePair<string, object?>("service", _serviceName),
             new KeyValuePair<string, object?>("reason", ReasonTag(reason)));
 
+        CancelLostToken();
+    }
+
+    /// <summary>
+    /// Cancels <see cref="LostToken"/> without letting a consumer's callback take the
+    /// detector loop down with it.
+    /// </summary>
+    /// <remarks>
+    /// <c>Cancel()</c> runs every callback registered on the token synchronously, on
+    /// this thread, and rethrows anything they throw as an <see cref="AggregateException"/>.
+    /// The token is already cancelled by the time that happens, so the lease is
+    /// correctly lost either way; what would be wrong is the watchdog or renewal loop
+    /// faulting over someone else's bug and reporting it as its own.
+    /// </remarks>
+    private void CancelLostToken()
+    {
         try
         {
             _lostCts.Cancel();
@@ -305,6 +329,13 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
         catch (ObjectDisposedException)
         {
             // Raced with disposal; the lease is going away anyway.
+        }
+        catch (AggregateException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "A callback registered on LostToken threw for lease {SessionId}; the lease is still marked lost",
+                _sessionId);
         }
     }
 
@@ -341,20 +372,18 @@ internal sealed class ConsulLeadershipLease : ILeadershipLease
         }
 
         // Records the term and decrements the held gauge, unless a detector already did.
-        // Cancelled rather than Released when the caller's token went first, so the
-        // metrics distinguish an orderly hand-off from a host shutting down.
-        MarkLost(
-            _lostToken.IsCancellationRequested ? LeadershipLostReason.Cancelled : LeadershipLostReason.Released,
-            "the lease was disposed");
+        // Always Released: from the lease's side, disposal is a release. Whether that
+        // release was a voluntary return or a host shutdown is a distinction only the
+        // caller can draw, and drawing it here from IsCancellationRequested is a race —
+        // cancelling the caller's token propagates to this lease and to the caller's own
+        // linked token in no guaranteed order, so the check can read either value.
+        // LeaderElectedService makes that call from the token it actually owns.
+        MarkLost(LeadershipLostReason.Released, "the lease was disposed");
 
-        try
-        {
-            _lostCts.Cancel();
-        }
-        catch (ObjectDisposedException)
-        {
-            // Already gone.
-        }
+        // MarkLost already cancelled unless a detector got there first, in which case
+        // this is a no-op. Either way the loops must see a cancelled token before we
+        // await them.
+        CancelLostToken();
 
         foreach (var loop in new[] { _renewalLoop, _watchdogLoop, _watchLoop })
         {

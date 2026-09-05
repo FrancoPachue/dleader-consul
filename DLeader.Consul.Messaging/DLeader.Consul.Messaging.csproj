@@ -4,7 +4,7 @@
     <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
 
     <PackageId>DLeader.Consul.Messaging</PackageId>
-    <Version>2.0.0</Version>
+    <Version>2.0.1</Version>
     <Authors>FrancoPachue</Authors>
     <Description>Best-effort message fan-out between service instances over the Consul KV store. Split out of DLeader.Consul in 2.0. Not a queue: delivery is best-effort, retention is minutes, and an instance that is down when a message is published never sees it.</Description>
     <PackageTags>consul;messaging;pubsub;dotnet;microservices</PackageTags>

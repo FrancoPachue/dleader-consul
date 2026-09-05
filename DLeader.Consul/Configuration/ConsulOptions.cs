@@ -73,7 +73,7 @@ namespace DLeader.Consul.Configuration
         /// enforces a minimum of 10.
         /// </summary>
         /// <remarks>
-        /// The session is renewed at half this interval. A lease that has not managed a
+        /// The session is renewed at a third of this interval. A lease that has not managed a
         /// successful renewal within <c>SessionTTL - LeaseSafetyMarginSeconds</c>
         /// declares itself lost, so this is also the outer bound on how long a
         /// partitioned instance can keep believing it leads.

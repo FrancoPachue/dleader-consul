@@ -213,6 +213,42 @@ public class LeadershipLeaseTests
     // -----------------------------------------------------------------------------
 
     /// <summary>
+    /// Cancelling a token runs its callbacks synchronously and rethrows whatever they
+    /// throw. A consumer's broken callback must not take the detector loop down with
+    /// it: the lease is already lost by then, and the only correct outcome is a logged
+    /// warning and a lease that still reports why it ended.
+    /// </summary>
+    [Fact]
+    public async Task AThrowingLostTokenCallback_DoesNotStopTheLeaseFromBeingMarkedLost()
+    {
+        var serviceName = ConsulContainer.NewServiceName();
+        await using var node = _consul.CreateNode(serviceName, servicePort: 5001);
+
+        var lease = await node.TryAcquireLeadershipAsync();
+        Assert.NotNull(lease);
+
+        var callbackRan = false;
+        lease!.LostToken.Register(() =>
+        {
+            callbackRan = true;
+            throw new InvalidOperationException("consumer bug");
+        });
+
+        await DestroySessionOfAsync(serviceName, node.InstanceId);
+
+        await WaitUntilAsync(() => lease.LostToken.IsCancellationRequested, TimeSpan.FromSeconds(30),
+            "the lease never noticed the session was destroyed");
+
+        Assert.True(callbackRan);
+
+        // The reason must still have been recorded by the detector that fired, and
+        // disposal - which awaits the detector loops - must not surface the consumer's
+        // exception as a fault of its own.
+        Assert.Equal(LeadershipLostReason.LockKeyTaken, lease.LostReason);
+        await lease.DisposeAsync();
+    }
+
+    /// <summary>
     /// Destroys the Consul session a node's lease is holding, which is what Consul
     /// itself does when a TTL runs out.
     /// </summary>
@@ -238,6 +274,23 @@ public class LeadershipLeaseTests
         var at = clock.Elapsed;
         await lease.DisposeAsync();
         return at;
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout, string because)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(200);
+        }
+
+        Assert.Fail(because);
     }
 
     private static async Task<ILeadershipLease?> PollForLeaseAsync(

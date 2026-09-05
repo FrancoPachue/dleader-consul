@@ -96,7 +96,11 @@ public abstract class LeaderElectedService : BackgroundService
     /// nothing.
     /// </summary>
     /// <param name="reason">
-    /// Why the term ended.
+    /// Why the term ended. Never <see langword="null"/>: a term that
+    /// <see cref="ExecuteAsLeaderAsync"/> ended by returning is reported as
+    /// <see cref="LeadershipLostReason.Released"/>, and one ended by host shutdown as
+    /// <see cref="LeadershipLostReason.Cancelled"/>. The parameter stays nullable only
+    /// so that overrides written against 2.0.0 keep compiling.
     /// <see cref="LeadershipLostReason.LocalDeadlineExceeded"/> means this instance
     /// could not reach Consul rather than being told to stand down, which is worth
     /// treating differently from an orderly hand-off.
@@ -137,7 +141,17 @@ public abstract class LeaderElectedService : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Leader work failed; releasing the lease and retrying");
+                // Acquisition and leader work fail differently and deserve different
+                // messages: the first usually means Consul is unreachable or
+                // misconfigured, the second is the caller's code.
+                if (lease is null)
+                {
+                    _logger.LogError(ex, "Could not acquire leadership; retrying in {Delay}", RetryDelay);
+                }
+                else
+                {
+                    _logger.LogError(ex, "Leader work failed; releasing the lease and retrying in {Delay}", RetryDelay);
+                }
 
                 await DelayQuietlyAsync(RetryDelay, stoppingToken).ConfigureAwait(false);
             }
@@ -145,7 +159,16 @@ public abstract class LeaderElectedService : BackgroundService
             {
                 if (lease is not null)
                 {
-                    var reason = lease.LostReason;
+                    // Capture the detector's reason before disposal, because disposal
+                    // records its own (Released) and would mask a null. A null here means
+                    // no detector fired — the term ended because this loop let it, either
+                    // by the work returning or by the host stopping. Only this loop can
+                    // tell those apart, from the token it owns, so it decides rather than
+                    // asking the lease to guess.
+                    var reason = lease.LostReason
+                        ?? (stoppingToken.IsCancellationRequested
+                            ? LeadershipLostReason.Cancelled
+                            : LeadershipLostReason.Released);
 
                     await lease.DisposeAsync().ConfigureAwait(false);
 
